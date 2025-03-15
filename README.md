@@ -2,7 +2,7 @@
 Official implementation of [Robust-Wide: Robust Watermarking Against Instruction-Driven Image Editing](https://arxiv.org/abs/2402.12688).
 ## Train
 
-1. Download the [data](https://huggingface.co/datasets/timbrooks/instructpix2pix-clip-filtered) and put them into the data dir ./data.
+1. Download the [data](https://huggingface.co/datasets/timbrooks/instructpix2pix-clip-filtered) and put them into the data dir `./data`.
 
 2. Configure the train script and then run it.
 
@@ -11,13 +11,19 @@ bash train.sh
 ```
 
 ## Inference
-1. Put your original image in ./examples.
+1. Put your original image in `./examples`.
 
-2. Download the [checkpoints](https://drive.google.com/drive/folders/1Y67UuFQiWqX5mA_1TBUs9FB4OUvazrZe?usp=drive_link) and put them in ./checkpoints.
+2. Download the [checkpoints](https://drive.google.com/drive/folders/1Y67UuFQiWqX5mA_1TBUs9FB4OUvazrZe?usp=drive_link) and put them in `./checkpoints`.
 
 3. Configure the inference script and then run it.
 ```
 bash inference.sh
+```
+
+## Evaluate
+To reproduce the results presented in our paper, download the [data](https://huggingface.co/datasets/timbrooks/instructpix2pix-clip-filtered/blob/main/data/train-00019-of-00262-dbb9c716f5acb3d6.parquet) and place it in the `./eval_data` directory. Then, run:
+```
+bash evaluate.sh
 ```
 
 ## Acknowledgements
