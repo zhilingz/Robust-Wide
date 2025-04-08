@@ -30,7 +30,7 @@ bash evaluate.sh
 This code builds on the code from the [diffusers](https://github.com/huggingface/diffusers) library.
 
 ## Cite
-If you find this repository helpful, please cite the following:
+If you find this repository useful, please consider giving a star ⭐ and please cite as:
 ```
 @inproceedings{hu2025robust,
   title={Robust-wide: Robust watermarking against instruction-driven image editing},
