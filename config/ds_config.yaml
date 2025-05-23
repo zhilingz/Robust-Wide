@@ -1,0 +1,58 @@
+{
+    # 基础训练参数
+    "train_batch_size": "auto",          # 训练批次大小，"auto"表示自动根据脚本参数设置
+    "gradient_accumulation_steps": "auto", # 梯度累积步数，用于增大实际批次大小
+    "gradient_clipping": "auto",          # 梯度裁剪阈值，防止梯度爆炸
+
+    # 优化器设置
+    "optimizer": {
+        "type": "AdamW",                 # 使用 AdamW 优化器
+        "params": {
+            "lr": "auto",                # 学习率，自动设置
+            "weight_decay": "auto"       # 权重衰减，自动设置
+        }
+    },
+
+    # 学习率调度器
+    "scheduler": {
+        "type": "WarmupLR",             # 预热学习率调度器
+        "params": {
+            "warmup_min_lr": 0,          # 预热开始时的最小学习率
+            "warmup_max_lr": "auto",     # 预热结束时的最大学习率
+            "warmup_num_steps": "auto"   # 预热步数
+        }
+    },
+
+    # FP16 混合精度训练设置
+    "fp16": {
+        "enabled": true,                 # 启用 FP16 训练
+        "auto_cast": true,              # 自动转换精度
+        "loss_scale": 0,                # 0表示动态损失缩放
+        "initial_scale_power": 16,      # 初始损失缩放值为 2^16
+        "loss_scale_window": 1000,      # 动态损失缩放窗口大小
+        "hysteresis": 2,                # 损失缩放调整的滞后程度
+        "min_loss_scale": 1             # 最小损失缩放值
+    },
+
+    # ZeRO 优化设置
+    "zero_optimization": {
+        "stage": 3,                     # ZeRO 优化阶段，3是最激进的优化
+        "offload_optimizer": {          # 优化器状态卸载设置
+            "device": "cpu",            # 卸载到 CPU
+            "pin_memory": true          # 使用固定内存提高传输速度
+        },
+        "offload_param": {              # 模型参数卸载设置
+            "device": "cpu",            # 卸载到 CPU
+            "pin_memory": true          # 使用固定内存
+        },
+        "overlap_comm": true,           # 通信和计算重叠
+        "contiguous_gradients": true,   # 使用连续的内存存储梯度
+        "reduce_bucket_size": 2e8,      # 梯度归约桶大小
+        "stage3_prefetch_bucket_size": 2e8,    # Stage3 预取桶大小
+        "stage3_param_persistence_threshold": 1e6,  # 参数持久化阈值
+        "stage3_max_live_parameters": 1e9,     # 最大活跃参数数量
+        "stage3_max_reuse_distance": 1e9,      # 最大参数重用距离
+        "stage3_gather_16bit_weights_on_model_save": true  # 保存模型时收集16位权重
+    },
+    "zero_init": true                   # 启用 ZeRO 初始化
+}

@@ -1,0 +1,10 @@
+datasets
+transforms
+transformers
+diffusers
+deepspeed
+accelerate
+einops
+opencv-python
+omegaconf
+kornia
