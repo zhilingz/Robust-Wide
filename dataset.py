@@ -75,19 +75,17 @@ def get_hugging_dataset(instance_data_root, image_size, accelerator, train_size=
     num_samples = len(combined_dataset)
 
     # 检查样本数量
-    if num_samples < train_size + test_size:
+    if num_samples < train_size:
         print(f"数据集样本数量不足，使用所有样本作为训练集。")
         train_dataset = combined_dataset  # 使用所有样本作为训练集
-        # 从 instructpix2pix 数据集中加载测试集
-        instructpix2pix_dataset = load_dataset("timbrooks/instructpix2pix-clip-filtered")  # 加载 instructpix2pix 数据集
-        test_dataset = instructpix2pix_dataset["train"].select(range(test_size))  # 选择测试集样本
     else:
-        # 随机打乱数据集
-        combined_dataset = combined_dataset.shuffle(seed=42)
-        
-        # 分割数据集为训练集和测试集
+        # 分割数据集为训练集
         train_dataset = combined_dataset.select(range(train_size))
-        test_dataset = combined_dataset.select(range(train_size, train_size + test_size))
+    
+    # 测试集：永远从 instructpix2pix 数据集中加载
+    print("从 instructpix2pix 数据集中加载测试集")
+    instructpix2pix_dataset = load_dataset("timbrooks/instructpix2pix-clip-filtered")  # 加载 instructpix2pix 数据集
+    test_dataset = instructpix2pix_dataset["train"].select(range(test_size))  # 选择测试集样本
     
     # 确保只有主进程执行数据集转换
     with accelerator.main_process_first():

@@ -18,6 +18,7 @@ declare -a MODELS=(
     "/public/zhangzhiling/models/timbrooks/instruct-pix2pix-distill"
     "/public/zhangzhiling/models/stabilityai/sd-turbo"
     "/public/zhangzhiling/models/stabilityai/sd-x2-latent-upscaler"
+    "black-forest-labs/FLUX.1-Fill-dev"
 )
 DATA_DIR=${DATASETS[$DATA_ID]}
 MODEL_DIR=${MODELS[$MODEL_ID]}
@@ -28,10 +29,11 @@ echo "模型路径: $MODEL_DIR"
 if [ "$MODEL_DIR" = "/public/zhangzhiling/models/stabilityai/sd-x2-latent-upscaler" ]; then
   BATCH_SIZE=1
 else
-  BATCH_SIZE=2
+  BATCH_SIZE=1
 fi
 
 export HF_ENDPOINT="https://hf-mirror.com"
+
 
 # accelerate config
 
@@ -53,4 +55,6 @@ accelerate launch --config_file ./config/accelerate_config.yaml train.py \
   --decoder_weight 0.1 \
   --last_grad_steps 3 \
   --enc_latent_weight 0.001 \
-  --gradient_accumulation_steps 1
+  --gradient_accumulation_steps 1 \
+  --filter_threshold 0.3 \
+  --enable_realtime_filter

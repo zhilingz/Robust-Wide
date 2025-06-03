@@ -4,13 +4,15 @@ import argparse
 import datetime, pytz
 import json
 import logging
-import lpips
+import numpy as np
+import cv2
 
 import torch
-from torch import nn
 import torch.nn.functional as F
 import torch.utils.checkpoint
 from torchvision.utils import save_image
+from torchvision.transforms.functional import to_pil_image
+
 # 测试失真
 from PIL import Image
 from torchvision import transforms
@@ -37,6 +39,63 @@ from utils import (
 
 logger = logging.getLogger(__name__)
 
+def diff_image(before, after, thresh=15, kernel=3):
+    """
+    计算两张图像的差异区域占比
+    
+    Args:
+        before: 编辑前图像，形状为 (B, C, H, W) 或 (C, H, W)，值域 [-1, 1]
+        after: 编辑后图像，形状为 (B, C, H, W) 或 (C, H, W)，值域 [-1, 1]
+        thresh: 像素差异阈值 (0-255)
+        kernel: 形态学开运算核大小
+    
+    Returns:
+        ratios: 每张图像的编辑区域占比，形状为 (B,) 或标量
+    """
+    # 确保输入是4维张量 (B, C, H, W)
+    if before.dim() == 3:
+        before = before.unsqueeze(0)
+        after = after.unsqueeze(0)
+        squeeze_output = True
+    else:
+        squeeze_output = False
+    
+    # 转换到 [0, 255] 范围并转为numpy
+    before_np = ((before + 1) * 127.5).clamp(0, 255).byte().cpu().numpy()
+    after_np = ((after + 1) * 127.5).clamp(0, 255).byte().cpu().numpy()
+    
+    batch_size = before_np.shape[0]
+    ratios = []
+    
+    for i in range(batch_size):
+        # 获取单张图像，转换为 HWC 格式
+        img_before = before_np[i].transpose(1, 2, 0)  # CHW -> HWC
+        img_after = after_np[i].transpose(1, 2, 0)    # CHW -> HWC
+        
+        # 计算每个通道的差异
+        diff_b = np.abs(img_after[:,:,0].astype(np.int16) - img_before[:,:,0].astype(np.int16))
+        diff_g = np.abs(img_after[:,:,1].astype(np.int16) - img_before[:,:,1].astype(np.int16))
+        diff_r = np.abs(img_after[:,:,2].astype(np.int16) - img_before[:,:,2].astype(np.int16))
+        
+        # 合并三个通道的差异，取最大值
+        color_diff_magnitude = np.maximum(np.maximum(diff_b, diff_g), diff_r).astype(np.uint8)
+        
+        # 二值化
+        _, mask = cv2.threshold(color_diff_magnitude, thresh, 255, cv2.THRESH_BINARY)
+        
+        # 形态学开运算去除小杂点
+        kernel_elem = cv2.getStructuringElement(cv2.MORPH_RECT, (kernel, kernel))
+        mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel_elem, iterations=1)
+        
+        # 计算占比
+        ratio = mask.sum() / 255 / mask.size
+        ratios.append(ratio)
+    
+    ratios = torch.tensor(ratios, device=before.device)
+    
+    if squeeze_output:
+        return ratios.squeeze()
+    return ratios
 
 def initialize_pipeline(args, weight_dtype, device):
     # 训练：不同模型不同加载方式
@@ -58,6 +117,16 @@ def initialize_pipeline(args, weight_dtype, device):
             args.model_dir, torch_dtype=weight_dtype, local_files_only=True
         ).to(device)
         pipe = [pipe, upscaler]
+    elif "FLUX" in args.model_dir:
+        from custom.custom_flux import CustomFluxFillPipeline
+        pipe = CustomFluxFillPipeline.from_pretrained(
+            args.model_dir, torch_dtype=weight_dtype, local_files_only=True
+        )
+        pipe.load_lora_weights(
+            "RiverZ/normal-lora", local_files_only=True, 
+            weight_name="pytorch_lora_weights.safetensors",
+            lora_scale=1.0)
+        pipe = pipe.to(device)
     else:
         raise ValueError("model not supported")
 
@@ -86,7 +155,7 @@ def initialize_pipeline(args, weight_dtype, device):
 
     return pipe
 
-def generate_image(args, pipe, prompt, wm_image, accelerator, is_test=False):
+def generate_image(args, pipe, prompt, wm_image, accelerator, is_test=False, device=None):
     if not prompt:
         raise ValueError("Prompt cannot be empty")
     if is_test:
@@ -125,6 +194,7 @@ def generate_image(args, pipe, prompt, wm_image, accelerator, is_test=False):
                 last_grad_steps=args.last_grad_steps,
                 output_type="pt"
             ).images     # pipe返回值为StableDiffusionPipelineOutput 类型，需要取images，形状 (1, C, H, W)
+            generated_image = 2 * generated_image - 1 # 将值域从[-1,1]转为[0,1]，防止图片泛白
         elif "sd-x2-latent-upscaler" in args.model_dir:
             # 将水印图像编码到潜在空间
             # 移除: wm_image = wm_image.to(dtype=torch.float16) 
@@ -146,6 +216,7 @@ def generate_image(args, pipe, prompt, wm_image, accelerator, is_test=False):
             )
             # 方法二：将生成的图像调整到512x512大小
             generated_image = F.interpolate(generated_image, size=(512, 512), mode='bilinear', align_corners=False)
+            generated_image = 2 * generated_image - 1  
         elif "magicbrush" in args.model_dir:
             generated_image = pipe(
                 prompt, 
@@ -157,6 +228,34 @@ def generate_image(args, pipe, prompt, wm_image, accelerator, is_test=False):
                 last_grad_steps=args.last_grad_steps,
                 output_type="pt",
                 )
+        elif "FLUX" in args.model_dir:
+            # 将 tensor 转成 PIL 图像
+            pil_img = to_pil_image(denormalize(wm_image[0].cpu()))
+            width, height = pil_img.size
+            # 构造拼接图像和 mask
+            combined = Image.new("RGB", (width*2, height))
+            combined.paste(pil_img, (0, 0))
+            combined.paste(pil_img, (width, 0))
+            mask_array = np.zeros((height, width*2), dtype=np.uint8)
+            mask_array[:, width:] = 255
+            mask = Image.fromarray(mask_array)
+            # prompt
+            prompt = f'A diptych with two side-by-side images of the same scene. On the right, the scene is exactly the same as on the left but {prompt}'
+            # 运行 FluxFillPipeline
+            result = pipe(
+                prompt=prompt,
+                image=combined,
+                mask_image=mask,
+                height=height,
+                width=width*2,
+                guidance_scale=50,
+                num_inference_steps=28,
+                generator=torch.Generator("cpu").manual_seed(42),
+                output_type="pt"
+            ).images[0]
+            # 裁剪右半部分并转回 tensor
+            cropped = result.crop((width, 0, width*2, height))
+            generated_image = transforms.ToTensor()(cropped).unsqueeze(0).to(device)
         else:
             generated_image = pipe(
                 prompt, 
@@ -367,7 +466,7 @@ def test_model(args, wm_model, test_dataloader, device, accelerator):
             results["no_distortion"] += error_rate_no_distortion
             
             # ============ 场景2: 图像编辑失真 ============ #
-            generated_image = generate_image(args, test_pipe, prompt, wm_image, accelerator, is_test=True)
+            generated_image = generate_image(args, test_pipe, prompt, wm_image, accelerator, is_test=True, device=device)
             decoded_message_after_edit = wm_model.decoder(generated_image.to(dtype=torch.float32))
             
             error_rate_after_edit = decoded_message_error_rate_batch(
@@ -442,62 +541,25 @@ def main(args):
 
     params_to_optimize = list(p for p in wm_model.parameters() if p.requires_grad)
 
-    # ---------- LPIPS ----------
-    lpips_fn = lpips.LPIPS(net='vgg').to(device).eval()   # 不训练 LPIPS 网络
-    for p in lpips_fn.parameters():
-        p.requires_grad_(False)
-
-    # ---------- Patch-GAN 判别器 ----------
-    class PatchDiscriminator(nn.Module):
-        def __init__(self, in_channels=3, ndf=64):
-            super().__init__()
-            self.model = nn.Sequential(
-                nn.Conv2d(in_channels, ndf, 4, 2, 1), nn.LeakyReLU(0.2, True),
-                nn.Conv2d(ndf, ndf*2, 4, 2, 1), nn.BatchNorm2d(ndf*2), nn.LeakyReLU(0.2, True),
-                nn.Conv2d(ndf*2, ndf*4, 4, 2, 1), nn.BatchNorm2d(ndf*4), nn.LeakyReLU(0.2, True),
-                nn.Conv2d(ndf*4, 1, 4, 1, 1)         # Patch 输出
-            )
-        def forward(self, x): return self.model(x)
-
-    # 定义鉴别器网络用于GAN损失
-    class Discriminator(nn.Module):
-        def __init__(self):
-            super(Discriminator, self).__init__()
-            # 输入为3通道图像(RGB)
-            self.main = nn.Sequential(
-                # 输入: 3 x 512 x 512
-                nn.Conv2d(3, 64, 4, 2, 1, bias=False),
-                nn.LeakyReLU(0.2, inplace=True),
-                # 状态大小: 64 x 256 x 256
-                nn.Conv2d(64, 128, 4, 2, 1, bias=False),
-                nn.BatchNorm2d(128),
-                nn.LeakyReLU(0.2, inplace=True),
-                # 状态大小: 128 x 128 x 128
-                nn.Conv2d(128, 256, 4, 2, 1, bias=False),
-                nn.BatchNorm2d(256),
-                nn.LeakyReLU(0.2, inplace=True),
-                # 状态大小: 256 x 64 x 64
-                nn.Conv2d(256, 512, 4, 2, 1, bias=False),
-                nn.BatchNorm2d(512),
-                nn.LeakyReLU(0.2, inplace=True),
-                # 状态大小: 512 x 32 x 32
-                nn.Conv2d(512, 1, 4, 2, 1, bias=False),
-                # 状态大小: 1 x 16 x 16
-                nn.AdaptiveAvgPool2d(1),  # 输出: 1 x 1 x 1
-                nn.Sigmoid()
-            )
-
-        def forward(self, input):
-            return self.main(input)
-
-    # D = PatchDiscriminator().to(device)
-    D = Discriminator().to(device)
-    D.apply(lambda m: nn.init.normal_(m.weight, 0.0, 0.02) if isinstance(m, nn.Conv2d) else None)
-
     pipe = initialize_pipeline(args, weight_dtype, device)
     print("pipe",pipe)
 
-    train_dataset, test_dataset = get_hugging_dataset(args.train_data_dir, args.image_size, accelerator, args.train_size, args.test_size)
+    # 正常加载数据集，不使用筛选
+    train_dataset, test_dataset = get_hugging_dataset(
+        args.train_data_dir, 
+        args.image_size, 
+        accelerator, 
+        args.train_size, 
+        args.test_size
+    )
+    logger.info("使用完整数据集进行训练")
+
+    # 如果开启实时筛选，batch_size必须为1
+    if args.enable_realtime_filter:
+        if args.batch_size != 1:
+            logger.warning(f"开启实时筛选时，batch_size必须为1，当前设置为{args.batch_size}，已自动调整为1")
+            args.batch_size = 1
+
     train_dataloader = DataLoader(
         train_dataset,
         batch_size=args.batch_size,
@@ -513,26 +575,18 @@ def main(args):
         collate_fn=collate_fn,
     )
 
-    # opt = torch.optim.AdamW(params_to_optimize, lr=args.learning_rate,)
-    G_opt = torch.optim.AdamW(
-        (p for p in wm_model.parameters() if p.requires_grad), lr=args.learning_rate, betas=(0.5, 0.999)
-    )
-    D_opt = torch.optim.AdamW(D.parameters(), lr=args.learning_rate*0.5, betas=(0.5, 0.999))
+    opt = torch.optim.AdamW(params_to_optimize, lr=args.learning_rate,)
 
     lr_scheduler = get_scheduler(
         args.lr_scheduler,
-        optimizer=G_opt,
+        optimizer=opt,
         num_warmup_steps=args.lr_warmup_steps * args.gradient_accumulation_steps,
         num_training_steps=args.max_train_steps * args.gradient_accumulation_steps,
     )
 
-    # wm_model, opt, train_dataloader, test_dataloader, lr_scheduler = accelerator.prepare(
-    #     wm_model, opt, train_dataloader, test_dataloader, lr_scheduler
-    # )
-    wm_model, D, G_opt, D_opt, train_dataloader, test_dataloader, lr_scheduler = accelerator.prepare(
-        wm_model, D, G_opt, D_opt, train_dataloader, test_dataloader, lr_scheduler
+    wm_model, opt, train_dataloader, test_dataloader, lr_scheduler = accelerator.prepare(
+        wm_model, opt, train_dataloader, test_dataloader, lr_scheduler
     )
-
 
     def save_all(g_model, save_dir):
         unwrapped_model = accelerator.unwrap_model(g_model)
@@ -544,15 +598,43 @@ def main(args):
     step = 0
     global_step = 0
     finished_flag = False
+    
+    # 只在开启筛选时初始化统计变量
+    if args.enable_realtime_filter:
+        edit_ratios_all = []
+        processed_samples = 0  # 处理的样本总数
+        filtered_samples = 0   # 通过筛选的样本数
+        skipped_samples = 0    # 跳过的样本数
+    
     while True:
         for data in train_dataloader:
             step += 1
+            
             with accelerator.accumulate(wm_model):
                 message = torch.randint(0, 2, (args.batch_size, args.message_length)).to(
                     device=device, dtype=torch.float32
                 )
                 image, prompt = data["image"], data["prompt"]
 
+                # 前1000步训练wm_model,不开启筛选
+                if step>1000 and args.enable_realtime_filter:
+                    processed_samples += 1
+                    # 1) 先在 no_grad 环境里做粗筛
+                    with torch.no_grad():
+                        generated_preview =  generate_image(args, pipe, prompt, image, accelerator, device=device)
+                        edit_ratio = diff_image(image, generated_preview).item()
+                        edit_ratios_all.append(edit_ratio)
+                        if edit_ratio >= args.filter_threshold:
+                            # 编辑区域过大，跳过这个样本
+                            skipped_samples += 1
+                            # logger.info(f"skipped_samples, edit_ratio: {skipped_samples},{edit_ratio}")
+                            continue # 直接跳，连计算图都没建
+                        else:
+                            # 样本通过筛选
+                            filtered_samples += 1
+                            # logger.info(f"filtered_samples, edit_ratio: {filtered_samples},{edit_ratio}")
+                
+                # 2) 真正要训练的样本再跑一次 full forward（带梯度）
                 wm_image = wm_model.encoder(image, message)
 
                 if "sd-x2-latent-upscaler" in args.model_dir:
@@ -564,10 +646,26 @@ def main(args):
 
                 decoded_message_before_edit = wm_model.decoder(wm_image.to(dtype=torch.float32))
                 
-                generated_image = generate_image(args, pipe, prompt, wm_image, accelerator)
-                decoded_message_after_edit = wm_model.decoder(generated_image.to(dtype=torch.float32))
+                generated_image = generate_image(args, pipe, prompt, wm_image, accelerator, device=device)
+                
+                # edit_ratio = diff_image(wm_image, generated_image).item()
+                # if edit_ratio >= args.filter_threshold:
+                #     skipped_samples += 1
+                #     save_image(denormalize(wm_image[0].detach().cpu()), os.path.join(output_with_time_dir, f"{skipped_samples}_skipped_samples_wm_image.png"))
+                #     save_image(denormalize(generated_image[0].detach().cpu()), os.path.join(output_with_time_dir, f"{skipped_samples}_skipped_samples_generated_image.png"))    
+                #     logger.info(f"skipped_samples, edit_ratio: {skipped_samples},{edit_ratio}")
+                #     logger.info(f"prompt: {prompt}")
+                #     # continue
+                # else:
+                #     save_image(denormalize(wm_image[0].detach().cpu()), os.path.join(output_with_time_dir, f"{filtered_samples}_filtered_samples_wm_image.png"))
+                #     save_image(denormalize(generated_image[0].detach().cpu()), os.path.join(output_with_time_dir, f"{filtered_samples}_filtered_samples_generated_image.png"))    
+                #     logger.info(f"filtered_samples, edit_ratio: {filtered_samples},{edit_ratio}")
+                #     logger.info(f"prompt: {prompt}")
+                #     filtered_samples += 1
 
-                # Calculate losses, decoder_weight默认0.1
+                decoded_message_after_edit = wm_model.decoder(generated_image.to(dtype=torch.float32))
+                
+                # Calculate losses, decoder_weight默认0.1，enc_latent_weight 默认0.001
                 enc_pixel_loss = F.mse_loss(image.float(), wm_image.float())
                 enc_latent_loss = F.mse_loss(image_latents.float(), wm_image_latents.float())
                 dec_loss_before_edit = F.mse_loss(message, decoded_message_before_edit)
@@ -575,51 +673,31 @@ def main(args):
                 enc_loss = enc_pixel_loss + args.enc_latent_weight * enc_latent_loss
                 dec_loss = dec_loss_before_edit + args.decoder_weight * dec_loss_after_edit
 
-                # ---------- LPIPS 感知损失 ----------
-                lpips_loss = lpips_fn(wm_image, image).mean()
-
-                # ---------- GAN 损失 ----------
-                # 判别器需要对原图标记为 1，对水印图标记为 0
-                pred_real = D(image)
-                pred_fake = D(wm_image.detach())
-                # MSE 损失适合 PatchGAN
-                # loss_D = 0.5 * (F.mse_loss(pred_real, torch.ones_like(pred_real)) +
-                #                 F.mse_loss(pred_fake, torch.zeros_like(pred_fake)))
-                # BCE 损失适合Sigmoid判别器
-                loss_D = F.binary_cross_entropy(pred_real, torch.ones_like(pred_real)) + \
-                         F.binary_cross_entropy(pred_fake, torch.zeros_like(pred_fake))
-                
-                # 先反向判别器
-                accelerator.backward(loss_D)
-                D_opt.step(); D_opt.zero_grad()
-
-                # 生成器（编码器）欺骗判别器
-                pred_fake_for_G = D(wm_image)
-                # gan_loss_G = F.mse_loss(pred_fake_for_G, torch.ones_like(pred_fake_for_G))
-                gan_loss_G = F.binary_cross_entropy(pred_fake_for_G, torch.ones_like(pred_fake_for_G))
-
-                # 线性调整 enc_loss 系数
-                enc_loss_coeff = 0.1 + 0.9 * min(global_step, args.max_train_steps) / args.max_train_steps
+                # # 线性调整 enc_loss 系数
+                # enc_loss_coeff = 0.1 + 0.9 * min(global_step, args.max_train_steps) / args.max_train_steps
                 # loss = enc_loss_coeff * enc_loss + dec_loss
-                loss = enc_loss_coeff * enc_loss + dec_loss
-                lpips_weight, gan_weight = 0.00001, 0.0
-                if lpips_weight > 0:
-                    loss += enc_loss_coeff * lpips_weight * lpips_loss
-                if gan_weight > 0:
-                    loss += enc_loss_coeff * gan_weight * gan_loss_G
+                
+                # Curriculum-Style Weight Scheduling to Accelerate Convergence
+                if global_step < 500:
+                     w_pix, w_lat, w_dec = 0., 0., 0.
+                elif global_step < 2000:
+                     w_pix, w_lat, w_dec = 1., 0.1, 0.
+                else:
+                    w = min(1., (global_step-2000)/6000)
+                    w_pix, w_lat, w_dec = 1., 0.1, w
 
+                loss = (
+                    w_pix * enc_pixel_loss +
+                    w_lat * enc_latent_loss +
+                    dec_loss_before_edit +
+                    w_dec * dec_loss_after_edit
+                )
 
-                # accelerator.backward(loss)
-                # if accelerator.sync_gradients:
-                #     opt.step()
-                #     lr_scheduler.step()
-                #     opt.zero_grad()
                 accelerator.backward(loss)
                 if accelerator.sync_gradients:
-                    G_opt.step()
+                    opt.step()
                     lr_scheduler.step()
-                    G_opt.zero_grad()
-
+                    opt.zero_grad()
 
             if accelerator.sync_gradients:
                 global_step += 1
@@ -633,6 +711,7 @@ def main(args):
                         error_rate_before_edit = decoded_message_error_rate_batch(
                             message, decoded_message_before_edit
                         )
+                        
                         log_dict = {
                             "step": step,
                             "global_step": global_step,
@@ -646,6 +725,21 @@ def main(args):
                             "error_rate_before_edit": error_rate_before_edit,
                             "error_rate_after_edit": error_rate_after_edit,
                         }
+                        
+                        # 根据是否开启筛选添加不同的编辑区域信息
+                        if args.enable_realtime_filter:
+                            # 计算筛选统计信息
+                            filter_rate = filtered_samples / processed_samples if processed_samples > 0 else 0
+                            skip_rate = skipped_samples / processed_samples if processed_samples > 0 else 0
+                            
+                            log_dict.update({
+                                "processed_samples": processed_samples,
+                                "filtered_samples": filtered_samples,
+                                "skipped_samples": skipped_samples,
+                                "filter_rate": filter_rate,
+                                "skip_rate": skip_rate,
+                            })
+                        
                         logger.info(log_dict)
 
                     if global_step % args.save_steps == 0:
@@ -662,14 +756,15 @@ def main(args):
                         if isinstance(generated_image, torch.Tensor):
                             save_image(denormalize(generated_image[0].detach().cpu()), os.path.join(save_step_dir, "generated_image.png"))
                         else:
-                            # 如果 generated_image 是 list 或其他类型
                             save_image(denormalize(generated_image[0][0].detach().cpu()), os.path.join(save_step_dir, "generated_image.png"))
+                        
                         # 保存 prompt
                         with open(os.path.join(save_step_dir, "prompt.txt"), "w", encoding="utf-8") as f:
                             if isinstance(prompt, list):
                                 f.write(str(prompt[0]))
                             else:
                                 f.write(str(prompt))
+                        logger.info("save models!")
 
                         # 调用inference.py
                         image_file = './examples/Gadot.png'
@@ -680,9 +775,23 @@ def main(args):
                             f'--output_dir "{save_step_dir}"'
                         )
                         os.system(cmd)
-                        
-                        logger.info("save models and inference!")
 
+                        # 调用fft.py
+                        cmd = (
+                            f'python custom/fft.py '
+                            f'--folder "{save_step_dir}" '
+                        )
+                        os.system(cmd)
+
+                        # 调用diff.py
+                        cmd = (
+                            f'python custom/diff.py '
+                            f'--before "{save_step_dir}/wm_image.png" '
+                            f'--after "{save_step_dir}/generated_image.png" '
+                            f'--output "{save_step_dir}/diff.png"'
+                        )
+                        os.system(cmd)
+                        
             if global_step >= args.max_train_steps:
                 finished_flag = True
                 break
@@ -692,14 +801,41 @@ def main(args):
 
     if accelerator.is_main_process:
         save_all(wm_model, output_with_time_dir)
-        # 最后一次测试
         test_model(args, wm_model, test_dataloader, device, accelerator)
+        
+        # 最终统计（只在开启筛选时）
+        if args.enable_realtime_filter and edit_ratios_all:
+            final_avg_edit_ratio = np.mean(edit_ratios_all)
+            final_filter_rate = filtered_samples / processed_samples if processed_samples > 0 else 0
+            final_skip_rate = skipped_samples / processed_samples if processed_samples > 0 else 0
+            
+            # 保存最终统计信息
+            final_stats_file = os.path.join(output_with_time_dir, "final_statistics.json")
+            stats = {
+                "processed_samples": processed_samples,
+                "filtered_samples": filtered_samples,
+                "skipped_samples": skipped_samples,
+                "filter_rate": final_filter_rate,
+                "skip_rate": final_skip_rate,
+                "avg_edit_ratio": final_avg_edit_ratio,
+                "filter_threshold": args.filter_threshold,
+                "realtime_filter_enabled": True,
+                "edit_ratios_distribution": {
+                    "min": float(np.min(edit_ratios_all)),
+                    "max": float(np.max(edit_ratios_all)),
+                    "mean": float(np.mean(edit_ratios_all)),
+                    "std": float(np.std(edit_ratios_all)),
+                    "median": float(np.median(edit_ratios_all)),
+                }
+            }
+            
+            with open(final_stats_file, "w") as f:
+                json.dump(stats, f, indent=2, ensure_ascii=False)
 
     accelerator.end_training()
 
     # 只在主进程执行，结束训练后自动调用绘图脚本
     if accelerator.is_main_process:
-        # output_with_time_dir 是 setup_logging 返回的目录
         log_file_path = os.path.join(output_with_time_dir, "log.txt")
         logger.info(f"训练结束，开始生成绘图，日志路径: {log_file_path}")
         os.system(f"python custom/log2plt.py -l {log_file_path}")
@@ -727,5 +863,7 @@ if __name__ == "__main__":
     parser.add_argument("--wm_model_config", type=str, default=None)
     parser.add_argument("--last_grad_steps", type=int, default=3)
     parser.add_argument("--enc_latent_weight", type=float, default=None)
+    parser.add_argument("--filter_threshold", type=float, default=0.3, help="Threshold for filtering out samples")
+    parser.add_argument("--enable_realtime_filter", action="store_true", default=False, help="Enable real-time filtering")
     args = parser.parse_args()
     main(args)

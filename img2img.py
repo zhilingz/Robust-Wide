@@ -17,15 +17,15 @@ MODELS = [
     # "/public/zhangzhiling/models/timbrooks/instruct-pix2pix-distill",
     # "black-forest-labs/FLUX.1-Fill-dev",
     "/public/zhangzhiling/models/stabilityai/sd-turbo",
-    "/public/zhangzhiling/models/stabilityai/sd-x2-latent-upscaler",
+    # "/public/zhangzhiling/models/stabilityai/sd-x2-latent-upscaler",
 ]
 
 # 数据集路径
 DATASETS = [
     "/public/zhangzhiling/datasets/timbrooks___instructpix2pix-clip-filtered/default/0.0.0/aa665b890915f7a42f8615bee868a9f3447e178f",
-    "/public/zhangzhiling/datasets/BleachNick___ultra_edit_500k/default/0.0.0/8d78dc552b576027618ff2170c4c1d7bcaf27ad2",
-    "/public/zhangzhiling/datasets/osunlp___magic_brush/default/0.0.0/1d8d4629150d18ca50afab66391866f2085be989",
-    "/public/zhangzhiling/datasets/facebook___emu_edit_test_set/default/0.0.0/b31936a0b6c267e87d373014034cd8fb44ced2fb"
+    # "/public/zhangzhiling/datasets/BleachNick___ultra_edit_500k/default/0.0.0/8d78dc552b576027618ff2170c4c1d7bcaf27ad2",
+    # "/public/zhangzhiling/datasets/osunlp___magic_brush/default/0.0.0/1d8d4629150d18ca50afab66391866f2085be989",
+    # "/public/zhangzhiling/datasets/facebook___emu_edit_test_set/default/0.0.0/b31936a0b6c267e87d373014034cd8fb44ced2fb"
 ]
 
 # 你需要根据实际情况导入对应的pipeline
@@ -120,6 +120,7 @@ def generate_image(model_dir, pipe, prompt, image, last_grad_steps=3):
             last_grad_steps=last_grad_steps,
             output_type="pt"
         ).images
+        generated_image = 2 * generated_image - 1
     elif "sd-x2-latent-upscaler" in model_dir:
         with torch.cuda.amp.autocast():
             latent_dist = pipe[0].vae.encode(image).latent_dist
@@ -134,6 +135,7 @@ def generate_image(model_dir, pipe, prompt, image, last_grad_steps=3):
             output_type="pt"
         )
         generated_image = F.interpolate(generated_image, size=(512, 512), mode='bilinear', align_corners=False)
+        generated_image = 2 * generated_image - 1
     elif "FLUX" in model_dir:
         # 将 tensor 转成 PIL 图像
         pil_img = to_pil_image(denormalize(image[0].cpu()))
@@ -157,7 +159,7 @@ def generate_image(model_dir, pipe, prompt, image, last_grad_steps=3):
             guidance_scale=50,
             num_inference_steps=28,
             generator=torch.Generator("cpu").manual_seed(42),
-            output_type="pil"
+            output_type="pt"
         ).images[0]
         # 裁剪右半部分并转回 tensor
         cropped = result.crop((width, 0, width*2, height))
@@ -169,7 +171,8 @@ def generate_image(model_dir, pipe, prompt, image, last_grad_steps=3):
             num_inference_steps=20, 
             image_guidance_scale=1.5, 
             guidance_scale=7, 
-            generator=torch.Generator("cpu").manual_seed(42)
+            generator=torch.Generator("cpu").manual_seed(42),
+            output_type="pt"
             )
     else:
         generated_image = pipe(
@@ -292,7 +295,7 @@ def main():
             else:
                 img_to_save = edited_image_tensor[0][0].detach().cpu()
             
-            save_image(smart_denormalize(img_to_save), output_path)
+            save_image(denormalize(img_to_save), output_path)
             processed_count += 1
         
         print(f"模型 {model_name} 处理完成，释放资源")

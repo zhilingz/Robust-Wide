@@ -36,7 +36,7 @@ log_file = args.log_file
 # 获取日志文件所在的目录
 log_dir = os.path.dirname(log_file)
 
-# 正则表达式，用于匹配日志中的训练指标
+# 更新正则表达式，匹配包含所有字段的训练日志行
 train_pattern = r"""
     (\d{2}/\d{2}/\d{4}\s\d{2}:\d{2}:\d{2})  # 日期和时间
     \s-\sINFO\s-\s__main__\s-\s
@@ -51,7 +51,12 @@ train_pattern = r"""
         'psnr':\s([\d.e-]+),\s
         'ssim':\s([\d.e-]+),\s
         'error_rate_before_edit':\s([\d.e-]+),\s
-        'error_rate_after_edit':\s([\d.e-]+)
+        'error_rate_after_edit':\s([\d.e-]+),\s
+        'processed_samples':\s\d+,\s
+        'filtered_samples':\s\d+,\s
+        'skipped_samples':\s\d+,\s
+        'filter_rate':\s[\d.e-]+,\s
+        'skip_rate':\s[\d.e-]+
     \}
 """
 
@@ -127,7 +132,7 @@ with open(log_file, "r") as f:
             test_random_rotation  = float(test_match.group(16))
 
 # 创建折线图
-plt.figure(figsize=(12, 20))  # 增加高度以留出底部的更多测试结果
+plt.figure(figsize=(12, 18))
 
 # 子图 1: dec_loss_before_edit 和 dec_loss_after_edit
 plt.subplot(3, 1, 1)
@@ -165,12 +170,18 @@ plt.tight_layout()
 # 如果有测试结果，在图表底部添加各场景 BER 信息
 if test_date_time:
     fmt = "%m/%d/%Y %H:%M:%S"
-    st = datetime.datetime.strptime(start_time_str, fmt)
-    ed = datetime.datetime.strptime(end_time_str,   fmt)
-    delta = ed - st
+    # 添加安全检查
+    if start_time_str and end_time_str:
+        st = datetime.datetime.strptime(start_time_str, fmt)
+        ed = datetime.datetime.strptime(end_time_str,   fmt)
+        delta = ed - st
+        duration_info = f"Total duration: {delta}"
+    else:
+        duration_info = "Duration: N/A"
+    
     test_info = f"""
-    Training start:         {start_time_str}
-    Total duration:         {delta}
+    Training start:         {start_time_str or 'N/A'}
+    {duration_info}
     no_distortion_BER:      {test_no_distortion:.6f}
     edit_distortion_BER:    {test_edit_distortion:.6f}
     common_distortions_BER: {test_common_dist:.6f}
@@ -187,13 +198,12 @@ if test_date_time:
     random_crop_BER:        {test_random_crop:.6f}
     random_rotation_BER:    {test_random_rotation:.6f}
     """
-    plt.figtext(0.8, 0.1, test_info, ha="left", fontsize=9,
+    plt.figtext(0.8, 0.05, test_info, ha="left", fontsize=9,
                 bbox={"facecolor":"lightyellow", "alpha":0.5, "pad":5})
 
 # 保存图形为文件（包含测试结果）
 output_image_path = os.path.join(log_dir, "metrics_plot.png")
 plt.savefig(output_image_path, bbox_inches="tight")
-
 
 # 运行inference.py
 
@@ -205,7 +215,8 @@ if step_dirs:
     ckpt_dir = step_dirs[0]  # 取最大步骤的checkpoint
 else:
     # 如果没有特定步骤的文件夹，则使用整个日志文件夹
-    raise ValueError("未找到有效的检查点目录，请确保训练过程中保存了模型检查点\n")
+    print("警告：未找到有效的检查点目录，跳过推理步骤")
+    exit(0)
 
 print(f"使用检查点目录: {ckpt_dir}")
 

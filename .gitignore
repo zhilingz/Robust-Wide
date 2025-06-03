@@ -2,3 +2,5 @@ inference_results/
 log/
 temp/
 train_results/
+custom/__pycache__/
+__pycache__/

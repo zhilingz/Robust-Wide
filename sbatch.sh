@@ -19,5 +19,4 @@ echo "Current time: $(TZ='Asia/Shanghai' date)"
 
 conda activate Robust-Wide
 bash train.sh 
-# python junk.py
 echo "job end"
