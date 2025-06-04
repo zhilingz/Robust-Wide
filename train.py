@@ -673,25 +673,26 @@ def main(args):
                 enc_loss = enc_pixel_loss + args.enc_latent_weight * enc_latent_loss
                 dec_loss = dec_loss_before_edit + args.decoder_weight * dec_loss_after_edit
 
+                loss = enc_loss + dec_loss
+
                 # # 线性调整 enc_loss 系数
                 # enc_loss_coeff = 0.1 + 0.9 * min(global_step, args.max_train_steps) / args.max_train_steps
                 # loss = enc_loss_coeff * enc_loss + dec_loss
                 
                 # Curriculum-Style Weight Scheduling to Accelerate Convergence
-                if global_step < 500:
-                     w_pix, w_lat, w_dec = 0., 0., 0.
-                elif global_step < 2000:
-                     w_pix, w_lat, w_dec = 1., 0.1, 0.
-                else:
-                    w = min(1., (global_step-2000)/6000)
-                    w_pix, w_lat, w_dec = 1., 0.1, w
-
-                loss = (
-                    w_pix * enc_pixel_loss +
-                    w_lat * enc_latent_loss +
-                    dec_loss_before_edit +
-                    w_dec * dec_loss_after_edit
-                )
+                # if global_step < 500:
+                #      w_pix, w_lat, w_dec_bf, w_dec_af = 0.1, 0.0001, 1., 0.
+                # elif global_step < 2000:
+                #      w_pix, w_lat, w_dec_bf, w_dec_af = 1, 0.001, 1, 0.1
+                # else:
+                #     w = min(1., (global_step-2000)/6000)
+                #     w_pix, w_lat, w_dec_bf, w_dec_af = 1., 0.1, 1, 1
+                # loss = (
+                #     w_pix * enc_pixel_loss +
+                #     w_lat * enc_latent_loss +
+                #     w_dec_bf * dec_loss_before_edit +
+                #     w_dec_af * dec_loss_after_edit
+                # )
 
                 accelerator.backward(loss)
                 if accelerator.sync_gradients:
@@ -766,31 +767,16 @@ def main(args):
                                 f.write(str(prompt))
                         logger.info("save models!")
 
-                        # 调用inference.py
+                        # 调用脚本，生成inference、频谱图、编辑区域图、log图
                         image_file = './examples/Gadot.png'
-                        cmd = (
-                            f'python inference.py '
-                            f'--ckpt_dir "{save_step_dir}" '
-                            f'--image_file "{image_file}" '
-                            f'--output_dir "{save_step_dir}"'
-                        )
-                        os.system(cmd)
-
-                        # 调用fft.py
-                        cmd = (
-                            f'python custom/fft.py '
-                            f'--folder "{save_step_dir}" '
-                        )
-                        os.system(cmd)
-
-                        # 调用diff.py
-                        cmd = (
-                            f'python custom/diff.py '
-                            f'--before "{save_step_dir}/wm_image.png" '
-                            f'--after "{save_step_dir}/generated_image.png" '
-                            f'--output "{save_step_dir}/diff.png"'
-                        )
-                        os.system(cmd)
+                        cmds = [
+                            f'python inference.py --ckpt_dir "{save_step_dir}" --image_file "{image_file}" --output_dir "{save_step_dir}"',
+                            f'python custom/fft.py --folder "{save_step_dir}"',
+                            f'python custom/diff.py --before "{save_step_dir}/wm_image.png" --after "{save_step_dir}/generated_image.png" --output "{save_step_dir}/diff.png"',
+                            f'sbatch custom/lp.sh "{output_with_time_dir}/log.txt"'
+                        ]
+                        for cmd in cmds:
+                            os.system(cmd)
                         
             if global_step >= args.max_train_steps:
                 finished_flag = True

@@ -12,6 +12,7 @@ parser.add_argument("-l", "--log_file", type=str, required=True, help="Path to t
 args = parser.parse_args()
 
 steps = []
+global_steps = []
 dec_loss_before_edit = []
 dec_loss_after_edit = []
 ssim_values = []
@@ -42,7 +43,7 @@ train_pattern = r"""
     \s-\sINFO\s-\s__main__\s-\s
     \{
         'step':\s(\d+),\s
-        'global_step':\s\d+,\s
+        'global_step':\s(\d+),\s
         'lr':\s[\d.e-]+,\s
         'enc_pixel_loss':\s([\d.e-]+),\s
         'enc_latent_loss':\s([\d.e-]+),\s
@@ -90,15 +91,17 @@ with open(log_file, "r") as f:
         match = re.search(train_pattern, line.strip(), re.VERBOSE)
         if match:
             step = int(match.group(2))
-            before_edit = float(match.group(5))  # dec_loss_before_edit
-            after_edit = float(match.group(6))  # dec_loss_after_edit
-            psnr = float(match.group(7))  # psnr
-            ssim = float(match.group(8))  # ssim
-            error_rate_before = float(match.group(9))  # error_rate_before_edit
-            error_rate_after = float(match.group(10))  # error_rate_after_edit
+            global_step = int(match.group(3))  # 捕获global_step
+            before_edit = float(match.group(6))  # dec_loss_before_edit (索引调整)
+            after_edit = float(match.group(7))  # dec_loss_after_edit
+            psnr = float(match.group(8))  # psnr
+            ssim = float(match.group(9))  # ssim
+            error_rate_before = float(match.group(10))  # error_rate_before_edit
+            error_rate_after = float(match.group(11))  # error_rate_after_edit
             
             # 将数据添加到列表
             steps.append(step)
+            global_steps.append(global_step)  # 添加global_step
             dec_loss_before_edit.append(before_edit)
             dec_loss_after_edit.append(after_edit)
             psnr_values.append(psnr)
@@ -136,31 +139,31 @@ plt.figure(figsize=(12, 18))
 
 # 子图 1: dec_loss_before_edit 和 dec_loss_after_edit
 plt.subplot(3, 1, 1)
-plt.plot(steps, dec_loss_before_edit, label="dec_loss_before_edit", color="blue")
-plt.plot(steps, dec_loss_after_edit, label="dec_loss_after_edit", color="red")
-plt.xlabel("Step")
+plt.plot(global_steps, dec_loss_before_edit, label="dec_loss_before_edit", color="blue")
+plt.plot(global_steps, dec_loss_after_edit, label="dec_loss_after_edit", color="red")
+plt.xlabel("Global Step")
 plt.ylabel("Loss")
-plt.title("Decoder Loss Before and After Edit vs Step")
+plt.title("Decoder Loss Before and After Edit vs Global Step")
 plt.legend()
 plt.grid(True)
 
 # 子图 2: psnr 和 ssim
 plt.subplot(3, 1, 2)
-plt.plot(steps, psnr_values, label="PSNR", color="green")
-plt.plot(steps, ssim_values, label="SSIM", color="orange")
-plt.xlabel("Step")
+plt.plot(global_steps, psnr_values, label="PSNR", color="green")
+plt.plot(global_steps, ssim_values, label="SSIM", color="orange")
+plt.xlabel("Global Step")
 plt.ylabel("Metric Value")
-plt.title("PSNR and SSIM vs Step")
+plt.title("PSNR and SSIM vs Global Step")
 plt.legend()
 plt.grid(True)
 
 # 子图 3: error_rate_before_edit 和 error_rate_after_edit
 plt.subplot(3, 1, 3)
-plt.plot(steps, error_rate_before_edit_values, label="Error Rate Before Edit", color="brown")
-plt.plot(steps, error_rate_after_edit_values, label="Error Rate After Edit", color="gray")
-plt.xlabel("Step")
+plt.plot(global_steps, error_rate_before_edit_values, label="Error Rate Before Edit", color="brown")
+plt.plot(global_steps, error_rate_after_edit_values, label="Error Rate After Edit", color="gray")
+plt.xlabel("Global Step")
 plt.ylabel("Error Rate")
-plt.title("Error Rate Before and After Edit vs Step")
+plt.title("Error Rate Before and After Edit vs Global Step")
 plt.legend()
 plt.grid(True)
 

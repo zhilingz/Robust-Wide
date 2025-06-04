@@ -52,9 +52,9 @@ accelerate launch --config_file ./config/accelerate_config.yaml train.py \
   --lr_warmup_steps 400 \
   --log_steps 20 \
   --save_steps 2000 \
-  --decoder_weight 0.1 \
   --last_grad_steps 3 \
-  --enc_latent_weight 0.001 \
+  --decoder_weight 1 \
+  --enc_latent_weight 0.01 \
   --gradient_accumulation_steps 1 \
   --filter_threshold 0.3 \
   --enable_realtime_filter
