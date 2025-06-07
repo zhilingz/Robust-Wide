@@ -222,8 +222,8 @@ def generate_image(args, pipe, prompt, wm_image, accelerator, is_test=False, dev
                 prompt, 
                 image=wm_image, 
                 num_inference_steps=20, 
-                image_guidance_scale=1.5, 
-                guidance_scale=7, 
+                image_guidance_scale=2.0, 
+                guidance_scale=4, 
                 generator=torch.Generator("cpu").manual_seed(42),
                 last_grad_steps=args.last_grad_steps,
                 output_type="pt",
@@ -263,7 +263,7 @@ def generate_image(args, pipe, prompt, wm_image, accelerator, is_test=False, dev
                 num_images_per_prompt=1, 
                 num_inference_steps=20,
                 guidance_scale=10, 
-                image_guidance_scale=1.5, 
+                image_guidance_scale=2.0, # 1.5原图保留太少（62.98%的编辑区域），2.0还可以（38.45%的编辑区域）
                 last_grad_steps=args.last_grad_steps,
                 output_type="pt",
             )
@@ -616,8 +616,8 @@ def main(args):
                 )
                 image, prompt = data["image"], data["prompt"]
 
-                # 前1000步训练wm_model,不开启筛选
-                if step>1000 and args.enable_realtime_filter:
+                # 开启筛选
+                if args.enable_realtime_filter:
                     processed_samples += 1
                     # 1) 先在 no_grad 环境里做粗筛
                     with torch.no_grad():
@@ -673,26 +673,25 @@ def main(args):
                 enc_loss = enc_pixel_loss + args.enc_latent_weight * enc_latent_loss
                 dec_loss = dec_loss_before_edit + args.decoder_weight * dec_loss_after_edit
 
-                loss = enc_loss + dec_loss
-
                 # # 线性调整 enc_loss 系数
                 # enc_loss_coeff = 0.1 + 0.9 * min(global_step, args.max_train_steps) / args.max_train_steps
                 # loss = enc_loss_coeff * enc_loss + dec_loss
                 
                 # Curriculum-Style Weight Scheduling to Accelerate Convergence
-                # if global_step < 500:
-                #      w_pix, w_lat, w_dec_bf, w_dec_af = 0.1, 0.0001, 1., 0.
-                # elif global_step < 2000:
-                #      w_pix, w_lat, w_dec_bf, w_dec_af = 1, 0.001, 1, 0.1
-                # else:
-                #     w = min(1., (global_step-2000)/6000)
-                #     w_pix, w_lat, w_dec_bf, w_dec_af = 1., 0.1, 1, 1
-                # loss = (
-                #     w_pix * enc_pixel_loss +
-                #     w_lat * enc_latent_loss +
-                #     w_dec_bf * dec_loss_before_edit +
-                #     w_dec_af * dec_loss_after_edit
-                # )
+                if args.enable_realtime_filter:
+                    if global_step < 1000:
+                        w_pix, w_lat, w_dec_bf, w_dec_af = 1, 0.001, 1., 0.001
+                    else:
+                        w = min(1., (global_step-1000)/6000)
+                        w_pix, w_lat, w_dec_bf, w_dec_af = 1., 0.001, 1, 0.1*w
+                    loss = (
+                        w_pix * enc_pixel_loss +
+                        w_lat * enc_latent_loss +
+                        w_dec_bf * dec_loss_before_edit +
+                        w_dec_af * dec_loss_after_edit
+                    )
+                else:
+                    loss = enc_loss + dec_loss
 
                 accelerator.backward(loss)
                 if accelerator.sync_gradients:
@@ -754,10 +753,15 @@ def main(args):
                         # 保存编辑图片
                         save_image(denormalize(image[0].detach().cpu()), os.path.join(save_step_dir, "image.png"))
                         save_image(denormalize(wm_image[0].detach().cpu()), os.path.join(save_step_dir, "wm_image.png"))
+                        with torch.no_grad():
+                            generated_image_before_wm = generate_image(args, pipe, prompt, image, accelerator, device=device)
+                            
                         if isinstance(generated_image, torch.Tensor):
                             save_image(denormalize(generated_image[0].detach().cpu()), os.path.join(save_step_dir, "generated_image.png"))
+                            save_image(denormalize(generated_image_before_wm[0].detach().cpu()), os.path.join(save_step_dir, "generated_image_before_wm.png"))
                         else:
                             save_image(denormalize(generated_image[0][0].detach().cpu()), os.path.join(save_step_dir, "generated_image.png"))
+                            save_image(denormalize(generated_image_before_wm[0][0].detach().cpu()), os.path.join(save_step_dir, "generated_image_before_wm.png"))
                         
                         # 保存 prompt
                         with open(os.path.join(save_step_dir, "prompt.txt"), "w", encoding="utf-8") as f:

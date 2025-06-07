@@ -29,7 +29,7 @@ echo "模型路径: $MODEL_DIR"
 if [ "$MODEL_DIR" = "/public/zhangzhiling/models/stabilityai/sd-x2-latent-upscaler" ]; then
   BATCH_SIZE=1
 else
-  BATCH_SIZE=1
+  BATCH_SIZE=2
 fi
 
 export HF_ENDPOINT="https://hf-mirror.com"
@@ -53,8 +53,8 @@ accelerate launch --config_file ./config/accelerate_config.yaml train.py \
   --log_steps 20 \
   --save_steps 2000 \
   --last_grad_steps 3 \
-  --decoder_weight 1 \
-  --enc_latent_weight 0.01 \
+  --decoder_weight 0.1 \
+  --enc_latent_weight 0.001 \
   --gradient_accumulation_steps 1 \
   --filter_threshold 0.3 \
-  --enable_realtime_filter
+  --enable_realtime_filter \

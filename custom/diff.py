@@ -13,13 +13,24 @@ def build_parser() -> argparse.ArgumentParser:
                    help="Path to original image")
     p.add_argument("-a", "--after",  default="inference_results/timbrooks___instructpix2pix-clip-filtered/original_2.png",
                    help="Path to edited image")
-    p.add_argument("-o", "--output", default="inference_results/diff_output.png",
-                   help="Filename of saved result (default: diff_output.png)")
+    p.add_argument("-o", "--output", default=None,
+                   help="Filename of saved result (default: auto-generated based on --after path)")
     p.add_argument("-t", "--thresh", type=int, default=15,
                    help="Pixel-value threshold for change detection (default: 20)")
     p.add_argument("-k", "--kernel", type=int, default=3,
                    help="Kernel size for morphological opening (default: 3)")
     return p
+
+def generate_output_path(after_path):
+    """根据after路径生成输出路径，在文件名后添加_diff"""
+    after_path = Path(after_path)
+    # 获取文件名（不含扩展名）和扩展名
+    stem = after_path.stem
+    suffix = after_path.suffix
+    # 生成新的文件名：原文件名_diff.扩展名
+    new_filename = f"{stem}_diff{suffix}"
+    # 返回完整路径
+    return after_path.parent / new_filename
 
 def diff_mask(bgr_before, bgr_after, thresh=20, kernel=3):
     # 使用灰度图
@@ -51,6 +62,12 @@ def overlay_mask(bgr_img, mask, alpha=0.5):
 def main():
     args = build_parser().parse_args()
     before_path, after_path = Path(args.before), Path(args.after)
+    
+    # 如果没有指定输出路径，则根据after路径自动生成
+    if args.output is None:
+        output_path = generate_output_path(after_path)
+    else:
+        output_path = Path(args.output)
 
     # ── 读取并尺寸检查 ───────────────────────────────────
     bgr_before = cv2.imread(str(before_path), cv2.IMREAD_COLOR)
@@ -70,8 +87,8 @@ def main():
     concat  = cv2.hconcat([bgr_before, bgr_after, overlay])
 
     # ── 保存 ──────────────────────────────────────────
-    cv2.imwrite(args.output, concat)
-    print(f"已保存至: {args.output}")
+    cv2.imwrite(str(output_path), concat)
+    print(f"已保存至: {output_path}")
 
 if __name__ == "__main__":
     main()

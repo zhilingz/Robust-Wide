@@ -13,19 +13,19 @@ import time
 # 编辑模型路径
 MODELS = [
     # "/public/zhangzhiling/models/timbrooks/instruct-pix2pix",
-    "/public/zhangzhiling/models/vinesmsuic/magicbrush-jul7",
-    # "/public/zhangzhiling/models/timbrooks/instruct-pix2pix-distill",
+    # "/public/zhangzhiling/models/vinesmsuic/magicbrush-jul7",
+    "/public/zhangzhiling/models/timbrooks/instruct-pix2pix-distill",
     # "black-forest-labs/FLUX.1-Fill-dev",
-    "/public/zhangzhiling/models/stabilityai/sd-turbo",
+    # "/public/zhangzhiling/models/stabilityai/sd-turbo",
     # "/public/zhangzhiling/models/stabilityai/sd-x2-latent-upscaler",
 ]
 
 # 数据集路径
 DATASETS = [
     "/public/zhangzhiling/datasets/timbrooks___instructpix2pix-clip-filtered/default/0.0.0/aa665b890915f7a42f8615bee868a9f3447e178f",
-    # "/public/zhangzhiling/datasets/BleachNick___ultra_edit_500k/default/0.0.0/8d78dc552b576027618ff2170c4c1d7bcaf27ad2",
-    # "/public/zhangzhiling/datasets/osunlp___magic_brush/default/0.0.0/1d8d4629150d18ca50afab66391866f2085be989",
-    # "/public/zhangzhiling/datasets/facebook___emu_edit_test_set/default/0.0.0/b31936a0b6c267e87d373014034cd8fb44ced2fb"
+    "/public/zhangzhiling/datasets/BleachNick___ultra_edit_500k/default/0.0.0/8d78dc552b576027618ff2170c4c1d7bcaf27ad2",
+    "/public/zhangzhiling/datasets/osunlp___magic_brush/default/0.0.0/1d8d4629150d18ca50afab66391866f2085be989",
+    "/public/zhangzhiling/datasets/facebook___emu_edit_test_set/default/0.0.0/b31936a0b6c267e87d373014034cd8fb44ced2fb"
 ]
 
 # 你需要根据实际情况导入对应的pipeline
@@ -181,7 +181,7 @@ def generate_image(model_dir, pipe, prompt, image, last_grad_steps=3):
             num_images_per_prompt=1, 
             num_inference_steps=20,
             guidance_scale=10, 
-            image_guidance_scale=1.5, 
+            image_guidance_scale=2.0, 
             last_grad_steps=last_grad_steps,
             output_type="pt",
         )

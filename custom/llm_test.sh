@@ -4,7 +4,7 @@
 #SBATCH -c 4          # 申请 CPU 核心：1个
 #SBATCH --mem 10G     # 申请内存
 #SBATCH --gres gpu:1  # 分配1个GPU（纯 CPU 任务不用写）
-#SBATCH -t 48:00:00   # 设置任务运行时间，格式为小时:分钟:秒
+#SBATCH -t 1:00:00   # 设置任务运行时间，格式为小时:分钟:秒
 #SBATCH -o log/%j.out # 标准输出重定向到日志文件
 #SBATCH -e log/%j.out # 错误输出重定向到日志文件
 
@@ -18,5 +18,5 @@ scontrol show job ${SLURM_JOB_ID}
 echo "Current time: $(TZ='Asia/Shanghai' date)"
 
 conda activate Robust-Wide
-python custom/junk.py
+python custom/llm_test.py
 echo "job end"

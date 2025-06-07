@@ -38,26 +38,45 @@ log_file = args.log_file
 log_dir = os.path.dirname(log_file)
 
 # 更新正则表达式，匹配包含所有字段的训练日志行
-train_pattern = r"""
+train_pattern_full = r"""
     (\d{2}/\d{2}/\d{4}\s\d{2}:\d{2}:\d{2})  # 日期和时间
     \s-\sINFO\s-\s__main__\s-\s
     \{
         'step':\s(\d+),\s
         'global_step':\s(\d+),\s
-        'lr':\s[\d.e-]+,\s
-        'enc_pixel_loss':\s([\d.e-]+),\s
-        'enc_latent_loss':\s([\d.e-]+),\s
-        'dec_loss_before_edit':\s([\d.e-]+),\s
-        'dec_loss_after_edit':\s([\d.e-]+),\s
-        'psnr':\s([\d.e-]+),\s
-        'ssim':\s([\d.e-]+),\s
-        'error_rate_before_edit':\s([\d.e-]+),\s
-        'error_rate_after_edit':\s([\d.e-]+),\s
+        'lr':\s([\d.eE+-]+),\s
+        'enc_pixel_loss':\s([\d.eE+-]+),\s
+        'enc_latent_loss':\s([\d.eE+-]+),\s
+        'dec_loss_before_edit':\s([\d.eE+-]+),\s
+        'dec_loss_after_edit':\s([\d.eE+-]+),\s
+        'psnr':\s([\d.eE+-]+),\s
+        'ssim':\s([\d.eE+-]+),\s
+        'error_rate_before_edit':\s([\d.eE+-]+),\s
+        'error_rate_after_edit':\s([\d.eE+-]+),\s
         'processed_samples':\s\d+,\s
         'filtered_samples':\s\d+,\s
         'skipped_samples':\s\d+,\s
-        'filter_rate':\s[\d.e-]+,\s
-        'skip_rate':\s[\d.e-]+
+        'filter_rate':\s[\d.eE+-]+,\s
+        'skip_rate':\s[\d.eE+-]+
+    \}
+"""
+
+# 简化格式（不包含processed_samples等字段）
+train_pattern_simple = r"""
+    (\d{2}/\d{2}/\d{4}\s\d{2}:\d{2}:\d{2})  # 日期和时间
+    \s-\sINFO\s-\s__main__\s-\s
+    \{
+        'step':\s(\d+),\s
+        'global_step':\s(\d+),\s
+        'lr':\s([\d.eE+-]+),\s
+        'enc_pixel_loss':\s([\d.eE+-]+),\s
+        'enc_latent_loss':\s([\d.eE+-]+),\s
+        'dec_loss_before_edit':\s([\d.eE+-]+),\s
+        'dec_loss_after_edit':\s([\d.eE+-]+),\s
+        'psnr':\s([\d.eE+-]+),\s
+        'ssim':\s([\d.eE+-]+),\s
+        'error_rate_before_edit':\s([\d.eE+-]+),\s
+        'error_rate_after_edit':\s([\d.eE+-]+)
     \}
 """
 
@@ -87,21 +106,25 @@ test_pattern = r"""
 # 读取日志文件并解析数据
 with open(log_file, "r") as f:
     for line in f:
-        # 尝试匹配训练数据
-        match = re.search(train_pattern, line.strip(), re.VERBOSE)
+        # 尝试匹配训练数据 - 先尝试完整格式
+        match = re.search(train_pattern_full, line.strip(), re.VERBOSE)
+        if not match:
+            # 如果完整格式不匹配，尝试简化格式
+            match = re.search(train_pattern_simple, line.strip(), re.VERBOSE)
+        
         if match:
             step = int(match.group(2))
-            global_step = int(match.group(3))  # 捕获global_step
-            before_edit = float(match.group(6))  # dec_loss_before_edit (索引调整)
-            after_edit = float(match.group(7))  # dec_loss_after_edit
-            psnr = float(match.group(8))  # psnr
-            ssim = float(match.group(9))  # ssim
-            error_rate_before = float(match.group(10))  # error_rate_before_edit
-            error_rate_after = float(match.group(11))  # error_rate_after_edit
+            global_step = int(match.group(3))
+            before_edit = float(match.group(7))  # dec_loss_before_edit
+            after_edit = float(match.group(8))   # dec_loss_after_edit
+            psnr = float(match.group(9))         # psnr
+            ssim = float(match.group(10))         # ssim
+            error_rate_before = float(match.group(11))  # error_rate_before_edit
+            error_rate_after = float(match.group(12))   # error_rate_after_edit
             
             # 将数据添加到列表
             steps.append(step)
-            global_steps.append(global_step)  # 添加global_step
+            global_steps.append(global_step)
             dec_loss_before_edit.append(before_edit)
             dec_loss_after_edit.append(after_edit)
             psnr_values.append(psnr)
