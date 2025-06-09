@@ -47,6 +47,7 @@ accelerate launch --config_file ./config/accelerate_config.yaml train.py \
   --test_size 1200 \
   --batch_size $BATCH_SIZE \
   --max_train_steps 20000 \
+  --seed 42 \
   --learning_rate 1e-3 \
   --lr_scheduler "cosine" \
   --lr_warmup_steps 400 \
@@ -54,7 +55,7 @@ accelerate launch --config_file ./config/accelerate_config.yaml train.py \
   --save_steps 2000 \
   --last_grad_steps 3 \
   --decoder_weight 0.1 \
-  --enc_latent_weight 0.001 \
+  --enc_latent_weight 0.01 \
   --gradient_accumulation_steps 1 \
   --filter_threshold 0.3 \
   --enable_realtime_filter \

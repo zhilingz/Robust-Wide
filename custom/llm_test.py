@@ -1,3 +1,6 @@
+from accelerate.utils import set_seed
+set_seed(42)
+
 # 1. instruct-pix2pix-distill with LCM specified scheduler
 # from diffusers import StableDiffusionInstructPix2PixPipeline, LCMScheduler
 # import torch
@@ -35,8 +38,9 @@ import torch
 from diffusers import StableDiffusionInstructPix2PixPipeline, EulerAncestralDiscreteScheduler
 from PIL import Image
 import os
-image_path = "inference_results/timbrooks___instructpix2pix-clip-filtered/original_2.png"
-
+# image_path = "inference_results/timbrooks___instructpix2pix-clip-filtered/original_2.png"
+image_path = "/public/zhangzhiling/code/Robust-Wide/train_results/2025-06-08T11-00-36_timbrooks___instructpix2pix-clip-filtered_magicbrush-jul7/step4000/image.png"
+wm_image_path = "/public/zhangzhiling/code/Robust-Wide/train_results/2025-06-08T11-00-36_timbrooks___instructpix2pix-clip-filtered_magicbrush-jul7/step4000/wm_image.png"
 def load_local_image(image_path):
     image = Image.open(image_path)
     image = ImageOps.exif_transpose(image)
@@ -44,7 +48,8 @@ def load_local_image(image_path):
     return image
 
 image = load_local_image(image_path)
-prompt = "put her in a windmill"
+wm_image = load_local_image(wm_image_path)
+prompt = "have her be a zombie"
 num_inference_steps = 20
 image_guidance_scale = 2.0
 guidance_scale = 4
@@ -72,12 +77,20 @@ class MagicBrush():
         return image
 
 model = MagicBrush()
-image_output = model.infer_one_image(image, prompt, 42)
-output_path = "inference_results/llm_test_magicbrush_"+str(num_inference_steps)+"_"+str(image_guidance_scale)+"_"+str(guidance_scale)+".png"
-image_output.save(output_path)
+model.pipe.text_encoder.eval()
+model.pipe.unet.eval()
+model.pipe.vae.eval()
+with torch.no_grad():
+    image_output1 = model.infer_one_image(image, prompt, 42)
+    image_output2 = model.infer_one_image(wm_image, prompt, 42)
+output_path1 = "inference_results/generated_image_before_wm.png"
+output_path2 = "inference_results/generated_image.png"
+
+image_output1.save(output_path1)
+image_output2.save(output_path2)
 # 调用脚本，生成inference、频谱图、编辑区域图、log图
-cmd = f'python custom/diff.py --before "{image_path}" --after "{output_path}"'
-os.system(cmd)
+# cmd = f'python custom/diff.py --before "{image_path}" --after "{output_path}"'
+# os.system(cmd)
 
 
 # 3. SD Turbo

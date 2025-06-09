@@ -155,9 +155,17 @@ def initialize_pipeline(args, weight_dtype, device):
 
     return pipe
 
-def generate_image(args, pipe, prompt, wm_image, accelerator, is_test=False, device=None):
+def generate_image(args, pipe, prompt, wm_image, accelerator, is_test=False, device=None, seed=None):
     if not prompt:
         raise ValueError("Prompt cannot be empty")
+    
+    # 设置默认种子
+    if seed is None:
+        seed = getattr(args, 'generation_seed', 42)  # 使用args中的种子，默认为42
+    
+    # 创建生成器，每次生成图片都重置Generator，避免每调用一次随机函数，内部状态就前进一次。
+    generator = torch.Generator(device="cpu").manual_seed(seed)
+    
     if is_test:
         # 这里的参数你可以根据需求调整
         generated_image = pipe(
@@ -167,6 +175,7 @@ def generate_image(args, pipe, prompt, wm_image, accelerator, is_test=False, dev
             num_inference_steps=20,
             guidance_scale=10,
             image_guidance_scale=1.5,
+            generator=generator,
             last_grad_steps=args.last_grad_steps,
             output_type="pt",
         )
@@ -180,6 +189,7 @@ def generate_image(args, pipe, prompt, wm_image, accelerator, is_test=False, dev
                 num_inference_steps=4,  # 4改为2，测试效果
                 guidance_scale=2.0,     # 使用较小的guidance_scale
                 image_guidance_scale=1.0,  # 使用较小的image_guidance_scale
+                generator=generator,
                 last_grad_steps=args.last_grad_steps,
                 output_type="pt"
             )
@@ -191,6 +201,7 @@ def generate_image(args, pipe, prompt, wm_image, accelerator, is_test=False, dev
                 num_inference_steps=2,
                 guidance_scale=0.0, 
                 strength=0.5,
+                generator=generator,
                 last_grad_steps=args.last_grad_steps,
                 output_type="pt"
             ).images     # pipe返回值为StableDiffusionPipelineOutput 类型，需要取images，形状 (1, C, H, W)
@@ -210,7 +221,7 @@ def generate_image(args, pipe, prompt, wm_image, accelerator, is_test=False, dev
                 image=low_res_latents,
                 num_inference_steps=20,
                 guidance_scale=0,
-                generator=torch.manual_seed(33),
+                generator=generator,
                 last_grad_steps=args.last_grad_steps,
                 output_type="pt"
             )
@@ -224,7 +235,7 @@ def generate_image(args, pipe, prompt, wm_image, accelerator, is_test=False, dev
                 num_inference_steps=20, 
                 image_guidance_scale=2.0, 
                 guidance_scale=4, 
-                generator=torch.Generator("cpu").manual_seed(42),
+                generator=generator,
                 last_grad_steps=args.last_grad_steps,
                 output_type="pt",
                 )
@@ -250,7 +261,7 @@ def generate_image(args, pipe, prompt, wm_image, accelerator, is_test=False, dev
                 width=width*2,
                 guidance_scale=50,
                 num_inference_steps=28,
-                generator=torch.Generator("cpu").manual_seed(42),
+                generator=generator,
                 output_type="pt"
             ).images[0]
             # 裁剪右半部分并转回 tensor
@@ -264,6 +275,7 @@ def generate_image(args, pipe, prompt, wm_image, accelerator, is_test=False, dev
                 num_inference_steps=20,
                 guidance_scale=10, 
                 image_guidance_scale=2.0, # 1.5原图保留太少（62.98%的编辑区域），2.0还可以（38.45%的编辑区域）
+                generator=generator,
                 last_grad_steps=args.last_grad_steps,
                 output_type="pt",
             )
@@ -512,6 +524,59 @@ def test_model(args, wm_model, test_dataloader, device, accelerator):
     wm_model.train()
     return log_dict
 
+def save_all(g_model, save_dir, accelerator, args, wm_model_config, pipe, image, wm_image, prompt, output_with_time_dir):
+    """
+    保存模型、配置文件、图片和执行相关脚本
+    """
+    # 保存模型和配置
+    unwrapped_model = accelerator.unwrap_model(g_model)
+    accelerator.save(unwrapped_model.state_dict(), os.path.join(save_dir, "wm_model.ckpt"))
+    with open(os.path.join(save_dir, "train_config.json"), "w") as f:
+        json.dump(vars(args), f, indent=2)
+    OmegaConf.save(wm_model_config, os.path.join(save_dir, "wm_model_config.yaml"))
+    
+    # 保存编辑图片
+    save_image(denormalize(image[0].detach().cpu()), os.path.join(save_dir, "image.png"))
+    save_image(denormalize(wm_image[0].detach().cpu()), os.path.join(save_dir, "wm_image.png"))
+    
+    with torch.no_grad():   
+        pipe.text_encoder.eval()
+        pipe.unet.eval()
+        pipe.vae.eval()
+        generated_image_before_wm = generate_image(args, pipe, prompt, image, accelerator, device=accelerator.device)
+        generated_image = generate_image(args, pipe, prompt, wm_image, accelerator, device=accelerator.device)
+        pipe.text_encoder.train()
+        pipe.unet.train()
+        pipe.vae.train()
+
+    if isinstance(generated_image, torch.Tensor):
+        save_image(denormalize(generated_image[0].detach().cpu()), os.path.join(save_dir, "generated_image.png"))
+        save_image(denormalize(generated_image_before_wm[0].detach().cpu()), os.path.join(save_dir, "generated_image_before_wm.png"))
+    else:
+        save_image(denormalize(generated_image[0][0].detach().cpu()), os.path.join(save_dir, "generated_image.png"))
+        save_image(denormalize(generated_image_before_wm[0][0].detach().cpu()), os.path.join(save_dir, "generated_image_before_wm.png"))
+    
+    # 保存 prompt
+    with open(os.path.join(save_dir, "prompt.txt"), "w", encoding="utf-8") as f:
+        if isinstance(prompt, list):
+            f.write(str(prompt[0]))
+        else:
+            f.write(str(prompt))
+    
+    logger.info("save models!")
+
+    # 调用脚本，生成inference、频谱图、编辑区域图、log图
+    image_file = './examples/Gadot.png'
+    cmds = [
+        f'python inference.py --ckpt_dir "{save_dir}" --image_file "{image_file}" --output_dir "{save_dir}"',
+        f'python custom/fft.py --folder "{save_dir}"',
+        f'python custom/diff.py --before "{save_dir}/wm_image.png" --after "{save_dir}/generated_image.png" --output "{save_dir}/diff.png"',
+        f'sbatch custom/lp.sh "{output_with_time_dir}/log.txt"',
+        f'python custom/res.py --folder "{save_dir}"'
+    ]
+    for cmd in cmds:
+        os.system(cmd)
+
 def main(args):
     if args.seed is not None:
         set_seed(args.seed)
@@ -587,13 +652,6 @@ def main(args):
     wm_model, opt, train_dataloader, test_dataloader, lr_scheduler = accelerator.prepare(
         wm_model, opt, train_dataloader, test_dataloader, lr_scheduler
     )
-
-    def save_all(g_model, save_dir):
-        unwrapped_model = accelerator.unwrap_model(g_model)
-        accelerator.save(unwrapped_model.state_dict(), os.path.join(save_dir, "wm_model.ckpt"))
-        with open(os.path.join(save_dir, "train_config.json"), "w") as f:
-            json.dump(vars(args), f, indent=2)
-        OmegaConf.save(wm_model_config, os.path.join(save_dir, "wm_model_config.yaml"))
 
     step = 0
     global_step = 0
@@ -678,20 +736,20 @@ def main(args):
                 # loss = enc_loss_coeff * enc_loss + dec_loss
                 
                 # Curriculum-Style Weight Scheduling to Accelerate Convergence
-                if args.enable_realtime_filter:
-                    if global_step < 1000:
-                        w_pix, w_lat, w_dec_bf, w_dec_af = 1, 0.001, 1., 0.001
-                    else:
-                        w = min(1., (global_step-1000)/6000)
-                        w_pix, w_lat, w_dec_bf, w_dec_af = 1., 0.001, 1, 0.1*w
-                    loss = (
-                        w_pix * enc_pixel_loss +
-                        w_lat * enc_latent_loss +
-                        w_dec_bf * dec_loss_before_edit +
-                        w_dec_af * dec_loss_after_edit
-                    )
-                else:
-                    loss = enc_loss + dec_loss
+                # if args.enable_realtime_filter:
+                #     if global_step < 1000:
+                #         w_pix, w_lat, w_dec_bf, w_dec_af = 1, 0.001, 1., 0.001
+                #     else:
+                #         w = min(1., (global_step-1000)/6000)
+                #         w_pix, w_lat, w_dec_bf, w_dec_af = 1., 0.001, 1, 0.1*w
+                #     loss = (
+                #         w_pix * enc_pixel_loss +
+                #         w_lat * enc_latent_loss +
+                #         w_dec_bf * dec_loss_before_edit +
+                #         w_dec_af * dec_loss_after_edit
+                #     )
+                # else:
+                loss = enc_loss + dec_loss
 
                 accelerator.backward(loss)
                 if accelerator.sync_gradients:
@@ -748,40 +806,8 @@ def main(args):
                         # 保存模型
                         save_step_dir = os.path.join(output_with_time_dir, f"step{global_step}")
                         os.makedirs(save_step_dir, exist_ok=True)
-                        save_all(wm_model, save_step_dir)
-                        
-                        # 保存编辑图片
-                        save_image(denormalize(image[0].detach().cpu()), os.path.join(save_step_dir, "image.png"))
-                        save_image(denormalize(wm_image[0].detach().cpu()), os.path.join(save_step_dir, "wm_image.png"))
-                        with torch.no_grad():
-                            generated_image_before_wm = generate_image(args, pipe, prompt, image, accelerator, device=device)
-                            
-                        if isinstance(generated_image, torch.Tensor):
-                            save_image(denormalize(generated_image[0].detach().cpu()), os.path.join(save_step_dir, "generated_image.png"))
-                            save_image(denormalize(generated_image_before_wm[0].detach().cpu()), os.path.join(save_step_dir, "generated_image_before_wm.png"))
-                        else:
-                            save_image(denormalize(generated_image[0][0].detach().cpu()), os.path.join(save_step_dir, "generated_image.png"))
-                            save_image(denormalize(generated_image_before_wm[0][0].detach().cpu()), os.path.join(save_step_dir, "generated_image_before_wm.png"))
-                        
-                        # 保存 prompt
-                        with open(os.path.join(save_step_dir, "prompt.txt"), "w", encoding="utf-8") as f:
-                            if isinstance(prompt, list):
-                                f.write(str(prompt[0]))
-                            else:
-                                f.write(str(prompt))
-                        logger.info("save models!")
+                        save_all(wm_model, save_step_dir, accelerator, args, wm_model_config, pipe, image, wm_image, prompt, output_with_time_dir)
 
-                        # 调用脚本，生成inference、频谱图、编辑区域图、log图
-                        image_file = './examples/Gadot.png'
-                        cmds = [
-                            f'python inference.py --ckpt_dir "{save_step_dir}" --image_file "{image_file}" --output_dir "{save_step_dir}"',
-                            f'python custom/fft.py --folder "{save_step_dir}"',
-                            f'python custom/diff.py --before "{save_step_dir}/wm_image.png" --after "{save_step_dir}/generated_image.png" --output "{save_step_dir}/diff.png"',
-                            f'sbatch custom/lp.sh "{output_with_time_dir}/log.txt"'
-                        ]
-                        for cmd in cmds:
-                            os.system(cmd)
-                        
             if global_step >= args.max_train_steps:
                 finished_flag = True
                 break
@@ -790,7 +816,15 @@ def main(args):
             break
 
     if accelerator.is_main_process:
-        save_all(wm_model, output_with_time_dir)
+        # 创建简化版的save_all用于最终保存
+        def save_final(g_model, save_dir):
+            unwrapped_model = accelerator.unwrap_model(g_model)
+            accelerator.save(unwrapped_model.state_dict(), os.path.join(save_dir, "wm_model.ckpt"))
+            with open(os.path.join(save_dir, "train_config.json"), "w") as f:
+                json.dump(vars(args), f, indent=2)
+            OmegaConf.save(wm_model_config, os.path.join(save_dir, "wm_model_config.yaml"))
+        
+        save_final(wm_model, output_with_time_dir)
         test_model(args, wm_model, test_dataloader, device, accelerator)
         
         # 最终统计（只在开启筛选时）
