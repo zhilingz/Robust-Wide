@@ -55,7 +55,8 @@ accelerate launch --config_file ./config/accelerate_config.yaml train.py \
   --save_steps 2000 \
   --last_grad_steps 3 \
   --decoder_weight 0.1 \
-  --enc_latent_weight 0.01 \
+  --enc_latent_weight 0.001 \
   --gradient_accumulation_steps 1 \
-  --filter_threshold 0.3 \
   --enable_realtime_filter \
+  --filter_threshold 15 \
+  --filter_method "psnr" \

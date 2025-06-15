@@ -5,6 +5,7 @@ import argparse
 import os
 import datetime
 import glob
+import numpy as np
 
 # 创建命令行参数解析器
 parser = argparse.ArgumentParser(description="Parse log file and plot metrics.")
@@ -80,7 +81,8 @@ train_pattern_simple = r"""
     \}
 """
 
-# 更新正则表达式，用于匹配更多 BER 类型的测试结果
+# 更新正则表达式，用于匹配更多 BER 类型的测试结果，包括新增的avg_psnr和avg_ssim
+# 支持 np.float64() 格式
 test_pattern = r"""
     (\d{2}/\d{2}/\d{4}\s\d{2}:\d{2}:\d{2})  # 日期和时间
     \s-\sINFO\s-\s__main__\s-\s
@@ -99,7 +101,9 @@ test_pattern = r"""
         'hue_BER':\s*([\d.eE+-]+),\s*
         'noise_denoise_BER':\s*([\d.eE+-]+),\s*
         'random_crop_BER':\s*([\d.eE+-]+),\s*
-        'random_rotation_BER':\s*([\d.eE+-]+)
+        'random_rotation_BER':\s*([\d.eE+-]+),\s*
+        'avg_psnr':\s*(?:np\.float64\()?([\d.eE+-]+)\)?,\s*
+        'avg_ssim':\s*(?:np\.float64\()?([\d.eE+-]+)\)?
     \}
 """
 
@@ -137,7 +141,7 @@ with open(log_file, "r") as f:
                 start_time_str = match.group(1)
             end_time_str = match.group(1)
         
-        # 尝试匹配测试结果（各种 BER）
+        # 尝试匹配测试结果（各种 BER 以及 avg_psnr 和 avg_ssim）
         test_match = re.search(test_pattern, line.strip(), re.VERBOSE)
         if test_match:
             test_date_time = test_match.group(1)
@@ -156,6 +160,8 @@ with open(log_file, "r") as f:
             test_noise_denoise    = float(test_match.group(14))
             test_random_crop      = float(test_match.group(15))
             test_random_rotation  = float(test_match.group(16))
+            test_avg_psnr         = float(test_match.group(17))
+            test_avg_ssim         = float(test_match.group(18))
 
 # 创建折线图
 plt.figure(figsize=(12, 18))
@@ -193,7 +199,7 @@ plt.grid(True)
 # 调整布局
 plt.tight_layout()
 
-# 如果有测试结果，在图表底部添加各场景 BER 信息
+# 如果有测试结果，在图表底部添加各场景 BER 信息以及平均PSNR和SSIM
 if test_date_time:
     fmt = "%m/%d/%Y %H:%M:%S"
     # 添加安全检查
@@ -208,23 +214,25 @@ if test_date_time:
     test_info = f"""
     Training start:         {start_time_str or 'N/A'}
     {duration_info}
-    no_distortion_BER:      {test_no_distortion:.6f}
-    edit_distortion_BER:    {test_edit_distortion:.6f}
-    common_distortions_BER: {test_common_dist:.6f}
-    jpeg_BER:               {test_jpeg:.6f}
-    median_blur_BER:        {test_median_blur:.6f}
-    gaussian_blur_BER:      {test_gaussian_blur:.6f}
-    gaussian_noise_BER:     {test_gaussian_noise:.6f}
-    sharpness_BER:          {test_sharpness:.6f}
-    brightness_BER:         {test_brightness:.6f}
-    contrast_BER:           {test_contrast:.6f}
-    saturation_BER:         {test_saturation:.6f}
-    hue_BER:                {test_hue:.6f}
-    noise_denoise_BER:      {test_noise_denoise:.6f}
-    random_crop_BER:        {test_random_crop:.6f}
-    random_rotation_BER:    {test_random_rotation:.6f}
+    psnr:                   {test_avg_psnr:.4f} dB
+    ssim:                   {test_avg_ssim:.4f}
+    no_distortion_BER:      {test_no_distortion:.4f}
+    edit_distortion_BER:    {test_edit_distortion:.4f}
+    common_distortions_BER: {test_common_dist:.4f}
+    jpeg_BER:               {test_jpeg:.4f}
+    median_blur_BER:        {test_median_blur:.4f}
+    gaussian_blur_BER:      {test_gaussian_blur:.4f}
+    gaussian_noise_BER:     {test_gaussian_noise:.4f}
+    sharpness_BER:          {test_sharpness:.4f}
+    brightness_BER:         {test_brightness:.4f}
+    contrast_BER:           {test_contrast:.4f}
+    saturation_BER:         {test_saturation:.4f}
+    hue_BER:                {test_hue:.4f}
+    noise_denoise_BER:      {test_noise_denoise:.4f}
+    random_crop_BER:        {test_random_crop:.4f}
+    random_rotation_BER:    {test_random_rotation:.4f}
     """
-    plt.figtext(0.8, 0.05, test_info, ha="left", fontsize=9,
+    plt.figtext(0.8, 0.05, test_info, ha="left", fontsize=12,
                 bbox={"facecolor":"lightyellow", "alpha":0.5, "pad":5})
 
 # 保存图形为文件（包含测试结果）

@@ -39,18 +39,24 @@ from utils import (
 
 logger = logging.getLogger(__name__)
 
-def diff_image(before, after, thresh=15, kernel=3):
+def diff_image(before, after, method='edit_ratio', thresh=15, kernel=3):
     """
-    计算两张图像的差异区域占比
+    使用多种方法计算两张图像的差异
     
     Args:
         before: 编辑前图像，形状为 (B, C, H, W) 或 (C, H, W)，值域 [-1, 1]
         after: 编辑后图像，形状为 (B, C, H, W) 或 (C, H, W)，值域 [-1, 1]
-        thresh: 像素差异阈值 (0-255)
-        kernel: 形态学开运算核大小
+        method: 差异计算方法，可选：
+               'edit_ratio' - 原始的编辑区域占比方法，阈值为0.3
+               'psnr' - 峰值信噪比 (越高越好)，阈值为15
+               'ssim' - 结构相似性指数 (越高越好)，阈值为0.75
+               'l1' - L1距离/MAE (越低越好)，阈值为0.2
+               'l2' - L2距离/MSE (越低越好)，阈值为0.2
+        thresh: 像素差异阈值 (仅用于edit_ratio方法)
+        kernel: 形态学开运算核大小 (仅用于edit_ratio方法)
     
     Returns:
-        ratios: 每张图像的编辑区域占比，形状为 (B,) 或标量
+        返回对应指标的张量，形状为 (B,) 或标量
     """
     # 确保输入是4维张量 (B, C, H, W)
     if before.dim() == 3:
@@ -60,42 +66,97 @@ def diff_image(before, after, thresh=15, kernel=3):
     else:
         squeeze_output = False
     
-    # 转换到 [0, 255] 范围并转为numpy
-    before_np = ((before + 1) * 127.5).clamp(0, 255).byte().cpu().numpy()
-    after_np = ((after + 1) * 127.5).clamp(0, 255).byte().cpu().numpy()
+    batch_size = before.shape[0]
+    device = before.device
     
-    batch_size = before_np.shape[0]
-    ratios = []
+    # 将值域从[-1,1]转换到[0,1]用于PSNR和SSIM计算
+    before_01 = (before + 1) / 2
+    after_01 = (after + 1) / 2
     
-    for i in range(batch_size):
-        # 获取单张图像，转换为 HWC 格式
-        img_before = before_np[i].transpose(1, 2, 0)  # CHW -> HWC
-        img_after = after_np[i].transpose(1, 2, 0)    # CHW -> HWC
-        
-        # 计算每个通道的差异
-        diff_b = np.abs(img_after[:,:,0].astype(np.int16) - img_before[:,:,0].astype(np.int16))
-        diff_g = np.abs(img_after[:,:,1].astype(np.int16) - img_before[:,:,1].astype(np.int16))
-        diff_r = np.abs(img_after[:,:,2].astype(np.int16) - img_before[:,:,2].astype(np.int16))
-        
-        # 合并三个通道的差异，取最大值
-        color_diff_magnitude = np.maximum(np.maximum(diff_b, diff_g), diff_r).astype(np.uint8)
-        
-        # 二值化
-        _, mask = cv2.threshold(color_diff_magnitude, thresh, 255, cv2.THRESH_BINARY)
-        
-        # 形态学开运算去除小杂点
-        kernel_elem = cv2.getStructuringElement(cv2.MORPH_RECT, (kernel, kernel))
-        mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel_elem, iterations=1)
-        
-        # 计算占比
-        ratio = mask.sum() / 255 / mask.size
-        ratios.append(ratio)
+    results = {}
+    skip_flag = False
     
-    ratios = torch.tensor(ratios, device=before.device)
+    if method == 'psnr':
+        # 计算PSNR (Peak Signal-to-Noise Ratio)
+        # 值越高表示图像质量越好
+        psnr_values = []
+        for i in range(batch_size):
+            psnr_val = psnr(after_01[i:i+1], before_01[i:i+1], max_val=1.0)
+            psnr_values.append(psnr_val.item())
+        results['psnr'] = torch.tensor(psnr_values, device=device)
+        if results['psnr'] < args.filter_threshold:
+            skip_flag = True
     
+    if method == 'ssim':
+        # 计算SSIM (Structural Similarity Index)
+        # 值越高表示结构相似性越好
+        ssim_values = []
+        for i in range(batch_size):
+            ssim_val = torch.mean(ssim(after_01[i:i+1], before_01[i:i+1], window_size=5))
+            ssim_values.append(ssim_val.item())
+        results['ssim'] = torch.tensor(ssim_values, device=device)
+        if results['ssim'] < args.filter_threshold:
+            skip_flag = True
+    
+    if method == 'l1':
+        # 计算L1距离 (Mean Absolute Error)
+        # 值越低表示差异越小
+        l1_values = F.l1_loss(after, before, reduction='none')
+        l1_values = l1_values.view(batch_size, -1).mean(dim=1)
+        results['l1'] = l1_values
+        if results['l1'] > args.filter_threshold:
+            skip_flag = True
+    
+    if method == 'l2':
+        # 计算L2距离 (Mean Squared Error)
+        # 值越低表示差异越小
+        l2_values = F.mse_loss(after, before, reduction='none')
+        l2_values = l2_values.view(batch_size, -1).mean(dim=1)
+        results['l2'] = l2_values
+        if results['l2'] > args.filter_threshold:
+            skip_flag = True
+
+    if method == 'edit_ratio':
+        # 原始的编辑区域占比方法
+        # 转换到 [0, 255] 范围并转为numpy
+        before_np = ((before + 1) * 127.5).clamp(0, 255).byte().cpu().numpy()
+        after_np = ((after + 1) * 127.5).clamp(0, 255).byte().cpu().numpy()
+        
+        ratios = []
+        for i in range(batch_size):
+            # 获取单张图像，转换为 HWC 格式
+            img_before = before_np[i].transpose(1, 2, 0)  # CHW -> HWC
+            img_after = after_np[i].transpose(1, 2, 0)    # CHW -> HWC
+            
+            # 计算每个通道的差异
+            diff_b = np.abs(img_after[:,:,0].astype(np.int16) - img_before[:,:,0].astype(np.int16))
+            diff_g = np.abs(img_after[:,:,1].astype(np.int16) - img_before[:,:,1].astype(np.int16))
+            diff_r = np.abs(img_after[:,:,2].astype(np.int16) - img_before[:,:,2].astype(np.int16))
+            
+            # 合并三个通道的差异，取最大值
+            color_diff_magnitude = np.maximum(np.maximum(diff_b, diff_g), diff_r).astype(np.uint8)
+            
+            # 二值化
+            _, mask = cv2.threshold(color_diff_magnitude, thresh, 255, cv2.THRESH_BINARY)
+            
+            # 形态学开运算去除小杂点
+            kernel_elem = cv2.getStructuringElement(cv2.MORPH_RECT, (kernel, kernel))
+            mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel_elem, iterations=1)
+            
+            # 计算占比
+            ratio = mask.sum() / 255 / mask.size
+            ratios.append(ratio)
+        
+        results['edit_ratio'] = torch.tensor(ratios, device=device)
+        if results['edit_ratio'] > args.filter_threshold:
+            skip_flag = True
+    
+    # 返回结果
+    result = results[method]
     if squeeze_output:
-        return ratios.squeeze()
-    return ratios
+        return result.squeeze()
+    return result, skip_flag
+
 
 def initialize_pipeline(args, weight_dtype, device):
     # 训练：不同模型不同加载方式
@@ -288,7 +349,14 @@ def setup_logging(args, logger):
 
     # 获取当前时间并构建输出目录
     now = datetime.datetime.now(pytz.timezone('Asia/Shanghai')).strftime("%Y-%m-%dT%H-%M-%S")
-    output_with_time_dir = os.path.join(args.output_dir, f"{now}_{data_name}_{model_name}") 
+    
+    # 获取SLURM任务ID
+    slurm_job_id = os.environ.get("SLURM_JOB_ID", "")
+    if slurm_job_id:
+        output_with_time_dir = os.path.join(args.output_dir, f"{now}_{data_name}_{model_name}_{slurm_job_id}")
+    else:
+        output_with_time_dir = os.path.join(args.output_dir, f"{now}_{data_name}_{model_name}")
+    
     os.makedirs(output_with_time_dir, exist_ok=True)
 
     # 自定义时区格式化器类
@@ -336,7 +404,7 @@ def test_model(args, wm_model, test_dataloader, device, accelerator):
     2. 图像编辑失真场景(使用生成模型)
     3. 通用失真场景(包括多种图像处理操作)
     
-    输出每种场景的比特错误率(BER)
+    输出每种场景的比特错误率(BER)以及原图和水印图的SSIM和PSNR
     """
     # 重新加载 test_pipe
     from custom.custom_insp2p import CustomStableDiffusionInstructPix2PixPipeline
@@ -456,6 +524,10 @@ def test_model(args, wm_model, test_dataloader, device, accelerator):
     for dist_type in distortion_types:
         results[f"{dist_type}"] = 0
     
+    # 添加SSIM和PSNR收集器
+    psnr_values = []
+    ssim_values = []
+    
     # 计算数据集大小用于平均
     dataset_size = len(test_dataloader)
 
@@ -468,6 +540,13 @@ def test_model(args, wm_model, test_dataloader, device, accelerator):
             image, prompt = data["image"], data["prompt"]
             
             wm_image = wm_model.encoder(image, message)
+            
+            # 计算原图和水印图的PSNR和SSIM
+            psnr_value = psnr(denormalize(wm_image.detach()), denormalize(image), 1)
+            ssim_value = torch.mean(ssim(denormalize(wm_image.detach()), denormalize(image), window_size=5))
+            
+            psnr_values.append(psnr_value.item())
+            ssim_values.append(ssim_value.item())
             
             # ============ 场景1: 无失真 ============ #
             decoded_message_no_distortion = wm_model.decoder(wm_image.to(dtype=torch.float32))
@@ -514,6 +593,10 @@ def test_model(args, wm_model, test_dataloader, device, accelerator):
     # 处理通用失真中每种失真类型的平均错误率
     for dist_type in distortion_types:
         log_dict[f"{dist_type}_BER"] = results[dist_type] / dataset_size
+    
+    # 添加SSIM和PSNR的平均值
+    log_dict["psnr"] = float(np.mean(psnr_values))
+    log_dict["ssim"] = float(np.mean(ssim_values))
     
     logger.info(log_dict)
     
@@ -571,7 +654,8 @@ def save_all(g_model, save_dir, accelerator, args, wm_model_config, pipe, image,
         f'python inference.py --ckpt_dir "{save_dir}" --image_file "{image_file}" --output_dir "{save_dir}"',
         f'python custom/fft.py --folder "{save_dir}"',
         f'python custom/diff.py --before "{save_dir}/wm_image.png" --after "{save_dir}/generated_image.png" --output "{save_dir}/diff.png"',
-        f'sbatch custom/lp.sh "{output_with_time_dir}/log.txt"',
+        # f'sbatch custom/lp.sh "{output_with_time_dir}/log.txt"',
+        f'python custom/log2plt.py -l "{output_with_time_dir}/log.txt"',
         f'python custom/res.py --folder "{save_dir}"'
     ]
     for cmd in cmds:
@@ -659,7 +743,7 @@ def main(args):
     
     # 只在开启筛选时初始化统计变量
     if args.enable_realtime_filter:
-        edit_ratios_all = []
+        diff_values_all = []
         processed_samples = 0  # 处理的样本总数
         filtered_samples = 0   # 通过筛选的样本数
         skipped_samples = 0    # 跳过的样本数
@@ -680,9 +764,9 @@ def main(args):
                     # 1) 先在 no_grad 环境里做粗筛
                     with torch.no_grad():
                         generated_preview =  generate_image(args, pipe, prompt, image, accelerator, device=device)
-                        edit_ratio = diff_image(image, generated_preview).item()
-                        edit_ratios_all.append(edit_ratio)
-                        if edit_ratio >= args.filter_threshold:
+                        diff_value, skip_flag = diff_image(image, generated_preview, method=args.filter_method)
+                        diff_values_all.append(diff_value)
+                        if skip_flag:
                             # 编辑区域过大，跳过这个样本
                             skipped_samples += 1
                             # logger.info(f"skipped_samples, edit_ratio: {skipped_samples},{edit_ratio}")
@@ -705,22 +789,7 @@ def main(args):
                 decoded_message_before_edit = wm_model.decoder(wm_image.to(dtype=torch.float32))
                 
                 generated_image = generate_image(args, pipe, prompt, wm_image, accelerator, device=device)
-                
-                # edit_ratio = diff_image(wm_image, generated_image).item()
-                # if edit_ratio >= args.filter_threshold:
-                #     skipped_samples += 1
-                #     save_image(denormalize(wm_image[0].detach().cpu()), os.path.join(output_with_time_dir, f"{skipped_samples}_skipped_samples_wm_image.png"))
-                #     save_image(denormalize(generated_image[0].detach().cpu()), os.path.join(output_with_time_dir, f"{skipped_samples}_skipped_samples_generated_image.png"))    
-                #     logger.info(f"skipped_samples, edit_ratio: {skipped_samples},{edit_ratio}")
-                #     logger.info(f"prompt: {prompt}")
-                #     # continue
-                # else:
-                #     save_image(denormalize(wm_image[0].detach().cpu()), os.path.join(output_with_time_dir, f"{filtered_samples}_filtered_samples_wm_image.png"))
-                #     save_image(denormalize(generated_image[0].detach().cpu()), os.path.join(output_with_time_dir, f"{filtered_samples}_filtered_samples_generated_image.png"))    
-                #     logger.info(f"filtered_samples, edit_ratio: {filtered_samples},{edit_ratio}")
-                #     logger.info(f"prompt: {prompt}")
-                #     filtered_samples += 1
-
+        
                 decoded_message_after_edit = wm_model.decoder(generated_image.to(dtype=torch.float32))
                 
                 # Calculate losses, decoder_weight默认0.1，enc_latent_weight 默认0.001
@@ -828,8 +897,8 @@ def main(args):
         test_model(args, wm_model, test_dataloader, device, accelerator)
         
         # 最终统计（只在开启筛选时）
-        if args.enable_realtime_filter and edit_ratios_all:
-            final_avg_edit_ratio = np.mean(edit_ratios_all)
+        if args.enable_realtime_filter and diff_values_all:
+            final_avg_diff_value = np.mean(diff_values_all)
             final_filter_rate = filtered_samples / processed_samples if processed_samples > 0 else 0
             final_skip_rate = skipped_samples / processed_samples if processed_samples > 0 else 0
             
@@ -841,15 +910,15 @@ def main(args):
                 "skipped_samples": skipped_samples,
                 "filter_rate": final_filter_rate,
                 "skip_rate": final_skip_rate,
-                "avg_edit_ratio": final_avg_edit_ratio,
+                "avg_diff_value": final_avg_diff_value,
                 "filter_threshold": args.filter_threshold,
                 "realtime_filter_enabled": True,
-                "edit_ratios_distribution": {
-                    "min": float(np.min(edit_ratios_all)),
-                    "max": float(np.max(edit_ratios_all)),
-                    "mean": float(np.mean(edit_ratios_all)),
-                    "std": float(np.std(edit_ratios_all)),
-                    "median": float(np.median(edit_ratios_all)),
+                "diff_values_distribution": {
+                    "min": float(np.min(diff_values_all)),
+                    "max": float(np.max(diff_values_all)),
+                    "mean": float(np.mean(diff_values_all)),
+                    "std": float(np.std(diff_values_all)),
+                    "median": float(np.median(diff_values_all)),
                 }
             }
             
@@ -889,5 +958,6 @@ if __name__ == "__main__":
     parser.add_argument("--enc_latent_weight", type=float, default=None)
     parser.add_argument("--filter_threshold", type=float, default=0.3, help="Threshold for filtering out samples")
     parser.add_argument("--enable_realtime_filter", action="store_true", default=False, help="Enable real-time filtering")
+    parser.add_argument("--filter_method", type=str, default="edit_ratio", help="Method for filtering out samples")
     args = parser.parse_args()
     main(args)

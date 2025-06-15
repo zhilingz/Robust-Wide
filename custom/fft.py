@@ -9,6 +9,7 @@ from scipy.fft import dctn
 def mag_spectrum_fft(arr):
     """Calculate magnitude spectrum using FFT"""
     return 20 * np.log(np.abs(np.fft.fftshift(np.fft.fft2(arr))) + 1)
+    # return 20 * np.log(np.abs(np.fft.fft2(arr)) + 1)
 
 def mag_spectrum_dct(arr):
     """Calculate magnitude spectrum using DCT"""
