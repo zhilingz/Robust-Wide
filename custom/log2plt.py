@@ -102,8 +102,8 @@ test_pattern = r"""
         'noise_denoise_BER':\s*([\d.eE+-]+),\s*
         'random_crop_BER':\s*([\d.eE+-]+),\s*
         'random_rotation_BER':\s*([\d.eE+-]+),\s*
-        'avg_psnr':\s*(?:np\.float64\()?([\d.eE+-]+)\)?,\s*
-        'avg_ssim':\s*(?:np\.float64\()?([\d.eE+-]+)\)?
+        'psnr':\s*([\d.eE+-]+),\s*
+        'ssim':\s*([\d.eE+-]+)
     \}
 """
 
@@ -214,7 +214,7 @@ if test_date_time:
     test_info = f"""
     Training start:         {start_time_str or 'N/A'}
     {duration_info}
-    psnr:                   {test_avg_psnr:.4f} dB
+    psnr:                   {test_avg_psnr:.2f} dB
     ssim:                   {test_avg_ssim:.4f}
     no_distortion_BER:      {test_no_distortion:.4f}
     edit_distortion_BER:    {test_edit_distortion:.4f}

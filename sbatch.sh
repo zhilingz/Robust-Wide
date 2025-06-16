@@ -4,7 +4,7 @@
 #SBATCH -c 4          # 申请 CPU 核心：4个
 #SBATCH --mem 10G     # 申请内存
 #SBATCH --gres gpu:1  # 分配1个GPU
-#SBATCH -t 48:00:00   # 设置任务运行时间，格式为小时:分钟:秒
+#SBATCH -t 72:00:00   # 设置任务运行时间，格式为小时:分钟:秒
 #SBATCH -o log/%j.out # 标准输出重定向到日志文件
 #SBATCH -e log/%j.out # 错误输出重定向到日志文件
 
@@ -82,7 +82,7 @@ accelerate launch --config_file ./config/accelerate_config.yaml train.py \
   --enc_latent_weight 0.001 \
   --gradient_accumulation_steps 1 \
   --enable_realtime_filter \
-  --filter_threshold 0.01 \
-  --filter_method "l2"
+  --filter_threshold 0.03 \
+  --filter_method "all"
 
 echo "job end"

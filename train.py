@@ -75,8 +75,26 @@ def diff_image(before, after, method='edit_ratio', thresh=15, kernel=3):
     
     results = {}
     skip_flag = False
-    
-    if method == 'psnr':
+
+    # 定义各指标的阈值
+    if method == 'all':
+        thresholds = {
+            'psnr': 20.0,        # PSNR阈值，单位dB
+            'ssim': 0.80,        # SSIM阈值
+            'l1': 0.1,           # L1距离阈值
+            'l2': 0.03,          # L2距离阈值
+            'edit_ratio': 0.20   # 编辑区域占比阈值
+        }
+    else:
+        thresholds = {
+            'psnr': args.filter_threshold,
+            'ssim': args.filter_threshold,
+            'l1': args.filter_threshold,
+            'l2': args.filter_threshold,
+            'edit_ratio': args.filter_threshold
+        }
+        
+    if method == 'psnr' or method == 'all':
         # 计算PSNR (Peak Signal-to-Noise Ratio)
         # 值越高表示图像质量越好
         psnr_values = []
@@ -84,10 +102,11 @@ def diff_image(before, after, method='edit_ratio', thresh=15, kernel=3):
             psnr_val = psnr(after_01[i:i+1], before_01[i:i+1], max_val=1.0)
             psnr_values.append(psnr_val.item())
         results['psnr'] = torch.tensor(psnr_values, device=device)
-        if results['psnr'] < args.filter_threshold:
+        if results['psnr'] < thresholds['psnr']:
             skip_flag = True
+            return skip_flag
     
-    if method == 'ssim':
+    if method == 'ssim' or method == 'all':
         # 计算SSIM (Structural Similarity Index)
         # 值越高表示结构相似性越好
         ssim_values = []
@@ -95,28 +114,31 @@ def diff_image(before, after, method='edit_ratio', thresh=15, kernel=3):
             ssim_val = torch.mean(ssim(after_01[i:i+1], before_01[i:i+1], window_size=5))
             ssim_values.append(ssim_val.item())
         results['ssim'] = torch.tensor(ssim_values, device=device)
-        if results['ssim'] < args.filter_threshold:
+        if results['ssim'] < thresholds['ssim']:
             skip_flag = True
+            return skip_flag
     
-    if method == 'l1':
+    if method == 'l1' or method == 'all':
         # 计算L1距离 (Mean Absolute Error)
         # 值越低表示差异越小
         l1_values = F.l1_loss(after, before, reduction='none')
         l1_values = l1_values.view(batch_size, -1).mean(dim=1)
         results['l1'] = l1_values
-        if results['l1'] > args.filter_threshold:
+        if results['l1'] > thresholds['l1']:
             skip_flag = True
-    
-    if method == 'l2':
+            return skip_flag
+        
+    if method == 'l2' or method == 'all':
         # 计算L2距离 (Mean Squared Error)
         # 值越低表示差异越小
         l2_values = F.mse_loss(after, before, reduction='none')
         l2_values = l2_values.view(batch_size, -1).mean(dim=1)
         results['l2'] = l2_values
-        if results['l2'] > args.filter_threshold:
+        if results['l2'] > thresholds['l2']:
             skip_flag = True
-
-    if method == 'edit_ratio':
+            return skip_flag
+        
+    if method == 'edit_ratio' or method == 'all':
         # 原始的编辑区域占比方法
         # 转换到 [0, 255] 范围并转为numpy
         before_np = ((before + 1) * 127.5).clamp(0, 255).byte().cpu().numpy()
@@ -148,14 +170,16 @@ def diff_image(before, after, method='edit_ratio', thresh=15, kernel=3):
             ratios.append(ratio)
         
         results['edit_ratio'] = torch.tensor(ratios, device=device)
-        if results['edit_ratio'] > args.filter_threshold:
+        if results['edit_ratio'] > thresholds['edit_ratio']:
             skip_flag = True
+            return skip_flag
     
+    return skip_flag
     # 返回结果
-    result = results[method]
-    if squeeze_output:
-        return result.squeeze()
-    return result, skip_flag
+    # result = results[method]
+    # if squeeze_output:
+    #     return result.squeeze()
+    # return result, skip_flag
 
 
 def initialize_pipeline(args, weight_dtype, device):
@@ -764,8 +788,8 @@ def main(args):
                     # 1) 先在 no_grad 环境里做粗筛
                     with torch.no_grad():
                         generated_preview =  generate_image(args, pipe, prompt, image, accelerator, device=device)
-                        diff_value, skip_flag = diff_image(image, generated_preview, method=args.filter_method)
-                        diff_values_all.append(diff_value)
+                        skip_flag = diff_image(image, generated_preview, method=args.filter_method)
+                        # diff_values_all.append(diff_value)
                         if skip_flag:
                             # 编辑区域过大，跳过这个样本
                             skipped_samples += 1
