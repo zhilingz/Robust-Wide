@@ -30,7 +30,7 @@ from omegaconf import OmegaConf
 from torch.utils.data import DataLoader
 from custom.custom_insp2p import CustomStableDiffusionInstructPix2PixPipeline
 
-from dataset import get_hugging_dataset, collate_fn
+from dataset import get_hugging_dataset, get_filtered_dataset, collate_fn
 from model import WatermarkModel
 from utils import (
     decoded_message_error_rate_batch,
@@ -180,7 +180,6 @@ def diff_image(before, after, method='edit_ratio', thresh=15, kernel=3):
     # if squeeze_output:
     #     return result.squeeze()
     # return result, skip_flag
-
 
 def initialize_pipeline(args, weight_dtype, device):
     # 训练：不同模型不同加载方式
@@ -359,7 +358,7 @@ def generate_image(args, pipe, prompt, wm_image, accelerator, is_test=False, dev
                 num_images_per_prompt=1, 
                 num_inference_steps=20,
                 guidance_scale=10, 
-                image_guidance_scale=2.0, # 1.5原图保留太少（62.98%的编辑区域），2.0还可以（38.45%的编辑区域）
+                image_guidance_scale=1.5, # 1.5原图保留太少（62.98%的编辑区域），2.0还可以（38.45%的编辑区域）
                 generator=generator,
                 last_grad_steps=args.last_grad_steps,
                 output_type="pt",
@@ -716,19 +715,30 @@ def main(args):
 
     pipe = initialize_pipeline(args, weight_dtype, device)
     print("pipe",pipe)
-
-    # 正常加载数据集，不使用筛选
-    train_dataset, test_dataset = get_hugging_dataset(
-        args.train_data_dir, 
-        args.image_size, 
-        accelerator, 
-        args.train_size, 
-        args.test_size
-    )
-    logger.info("使用完整数据集进行训练")
+    
+    if args.enable_offline_filter:
+        # 离线筛选数据集
+        train_dataset, test_dataset = get_filtered_dataset(
+            args, 
+            args.image_size, 
+            accelerator, 
+            args.train_size, 
+            args.test_size
+        )
+        logger.info("使用离线筛选数据集进行训练")
+    else:
+        # 正常加载数据集
+        train_dataset, test_dataset = get_hugging_dataset(
+            args.train_data_dir, 
+            args.image_size, 
+            accelerator, 
+            args.train_size, 
+            args.test_size
+        )
+        logger.info("使用完整数据集进行训练")
 
     # 如果开启实时筛选，batch_size必须为1
-    if args.enable_realtime_filter:
+    if args.enable_online_filter:
         if args.batch_size != 1:
             logger.warning(f"开启实时筛选时，batch_size必须为1，当前设置为{args.batch_size}，已自动调整为1")
             args.batch_size = 1
@@ -766,11 +776,15 @@ def main(args):
     finished_flag = False
     
     # 只在开启筛选时初始化统计变量
-    if args.enable_realtime_filter:
+    if args.enable_online_filter:
         diff_values_all = []
         processed_samples = 0  # 处理的样本总数
         filtered_samples = 0   # 通过筛选的样本数
         skipped_samples = 0    # 跳过的样本数
+        
+        # 创建保存筛选样本的目录
+        filtered_samples_dir = os.path.join(output_with_time_dir, "filtered_samples")
+        os.makedirs(filtered_samples_dir, exist_ok=True)
     
     while True:
         for data in train_dataloader:
@@ -782,23 +796,40 @@ def main(args):
                 )
                 image, prompt = data["image"], data["prompt"]
 
-                # 开启筛选
-                if args.enable_realtime_filter:
+                # 开启实时筛选
+                if args.enable_online_filter:
                     processed_samples += 1
                     # 1) 先在 no_grad 环境里做粗筛
                     with torch.no_grad():
-                        generated_preview =  generate_image(args, pipe, prompt, image, accelerator, device=device)
+                        generated_preview = generate_image(args, pipe, prompt, image, accelerator, device=device)
                         skip_flag = diff_image(image, generated_preview, method=args.filter_method)
                         # diff_values_all.append(diff_value)
                         if skip_flag:
                             # 编辑区域过大，跳过这个样本
                             skipped_samples += 1
-                            # logger.info(f"skipped_samples, edit_ratio: {skipped_samples},{edit_ratio}")
-                            continue # 直接跳，连计算图都没建
+                            continue
                         else:
                             # 样本通过筛选
                             filtered_samples += 1
-                            # logger.info(f"filtered_samples, edit_ratio: {filtered_samples},{edit_ratio}")
+                            
+                            # 保存前100个通过筛选的样本
+                            if filtered_samples <= 100:
+                                # 保存原图
+                                save_image(
+                                    denormalize(image[0].detach().cpu()),
+                                    os.path.join(filtered_samples_dir, f"{filtered_samples}_image.png")
+                                )
+                                # 保存生成图
+                                save_image(
+                                    denormalize(generated_preview[0].detach().cpu()),
+                                    os.path.join(filtered_samples_dir, f"{filtered_samples}_generated_preview.png")
+                                )
+                                # 保存prompt
+                                with open(os.path.join(filtered_samples_dir, f"{filtered_samples}_prompt.txt"), "w", encoding="utf-8") as f:
+                                    if isinstance(prompt, list):
+                                        f.write(str(prompt[0]))
+                                    else:
+                                        f.write(str(prompt))
                 
                 # 2) 真正要训练的样本再跑一次 full forward（带梯度）
                 wm_image = wm_model.encoder(image, message)
@@ -829,7 +860,7 @@ def main(args):
                 # loss = enc_loss_coeff * enc_loss + dec_loss
                 
                 # Curriculum-Style Weight Scheduling to Accelerate Convergence
-                # if args.enable_realtime_filter:
+                # if args.enable_online_filter:
                 #     if global_step < 1000:
                 #         w_pix, w_lat, w_dec_bf, w_dec_af = 1, 0.001, 1., 0.001
                 #     else:
@@ -878,7 +909,7 @@ def main(args):
                         }
                         
                         # 根据是否开启筛选添加不同的编辑区域信息
-                        if args.enable_realtime_filter:
+                        if args.enable_online_filter:
                             # 计算筛选统计信息
                             filter_rate = filtered_samples / processed_samples if processed_samples > 0 else 0
                             skip_rate = skipped_samples / processed_samples if processed_samples > 0 else 0
@@ -921,7 +952,7 @@ def main(args):
         test_model(args, wm_model, test_dataloader, device, accelerator)
         
         # 最终统计（只在开启筛选时）
-        if args.enable_realtime_filter and diff_values_all:
+        if args.enable_online_filter and diff_values_all:
             final_avg_diff_value = np.mean(diff_values_all)
             final_filter_rate = filtered_samples / processed_samples if processed_samples > 0 else 0
             final_skip_rate = skipped_samples / processed_samples if processed_samples > 0 else 0
@@ -981,7 +1012,8 @@ if __name__ == "__main__":
     parser.add_argument("--last_grad_steps", type=int, default=3)
     parser.add_argument("--enc_latent_weight", type=float, default=None)
     parser.add_argument("--filter_threshold", type=float, default=0.3, help="Threshold for filtering out samples")
-    parser.add_argument("--enable_realtime_filter", action="store_true", default=False, help="Enable real-time filtering")
+    parser.add_argument("--enable_online_filter", action="store_true", default=False, help="Enable real-time filtering")
     parser.add_argument("--filter_method", type=str, default="edit_ratio", help="Method for filtering out samples")
+    parser.add_argument("--enable_offline_filter", action="store_true", default=False, help="Enable offline filtering")
     args = parser.parse_args()
     main(args)
