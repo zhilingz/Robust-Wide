@@ -367,8 +367,12 @@ def generate_image(args, pipe, prompt, wm_image, accelerator, is_test=False, dev
 
 def setup_logging(args, logger):
     # 获取数据集名称和模型名称
-    data_name = args.train_data_dir.split(os.sep)[-4]
-    model_name = args.model_dir.split(os.sep)[-1]
+    if args.enable_offline_filter:
+        data_name = args.train_data_dir.split(os.sep)[-4]
+        model_name = args.model_dir.split(os.sep)[-1]
+    else:
+        data_name = args.train_data_dir.split(os.sep)[-3]
+        model_name = args.model_dir.split(os.sep)[-1]
 
     # 获取当前时间并构建输出目录
     now = datetime.datetime.now(pytz.timezone('Asia/Shanghai')).strftime("%Y-%m-%dT%H-%M-%S")

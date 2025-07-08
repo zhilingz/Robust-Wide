@@ -444,7 +444,7 @@ class ImageFilter:
                     }
                     logger.info(log_dict)
                 
-                # 每处理1000个样本保存一次metadata（无论是否通过筛选）
+                # 每处理10000个样本保存一次metadata（无论是否通过筛选）
                 if (i + 1) % 10000 == 0:
                     save_metadata_checkpoint(pass_count, all_metrics, i + 1)
                     

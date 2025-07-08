@@ -46,7 +46,7 @@ declare -a MODELS=(
 )
 
 # DATA_DIR=${DATASETS[$DATA_ID]}
-DATA_DIR="filtered_datasets/minmax1000/timbrooks___instructpix2pix-clip-filtered/magicbrush-jul7"
+DATA_DIR="filtered_datasets/max1000/timbrooks___instructpix2pix-clip-filtered/magicbrush-jul7"
 MODEL_DIR=${MODELS[$MODEL_ID]}
 echo "数据集路径: $DATA_DIR"
 echo "模型路径: $MODEL_DIR"

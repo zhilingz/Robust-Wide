@@ -5,3 +5,4 @@ train_results/
 custom/__pycache__/
 __pycache__/
 filtered_datasets/
+__init__.py

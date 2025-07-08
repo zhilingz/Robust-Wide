@@ -146,6 +146,7 @@ def get_filtered_dataset(args, image_size, accelerator, train_size=20000, test_s
     if total_samples < train_size:
         print(f"筛选数据集样本数量({total_samples})小于请求的训练集大小({train_size})，使用所有样本")
         train_dataset = filtered_dataset
+
     else:
         train_dataset = filtered_dataset.select(range(train_size))
     
