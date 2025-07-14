@@ -37,6 +37,7 @@ from utils import (
     denormalize,
 )
 
+
 logger = logging.getLogger(__name__)
 
 def diff_image(before, after, method='edit_ratio', thresh=15, kernel=3):
@@ -365,13 +366,184 @@ def generate_image(args, pipe, prompt, wm_image, accelerator, is_test=False, dev
             )
     return generated_image
 
+def calculate_edit_analysis(before, after, thresh=15, kernel=3):
+    """
+    计算编辑区域的mask和占比
+    """
+    try:
+        # 转换为numpy进行opencv操作
+        before_np = ((before.detach().cpu() + 1) * 127.5).clamp(0, 255).byte().numpy()[0].transpose(1, 2, 0)
+        after_np = ((after.detach().cpu() + 1) * 127.5).clamp(0, 255).byte().numpy()[0].transpose(1, 2, 0)
+        
+        # 计算颜色差异
+        diff = np.abs(after_np.astype(np.int16) - before_np.astype(np.int16))
+        color_diff = np.max(diff, axis=2).astype(np.uint8)
+        
+        # 二值化和形态学处理
+        _, mask = cv2.threshold(color_diff, thresh, 255, cv2.THRESH_BINARY)
+        kernel_elem = cv2.getStructuringElement(cv2.MORPH_RECT, (kernel, kernel))
+        mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel_elem, iterations=1)
+        
+        ratio = mask.sum() / 255 / mask.size
+        return mask, ratio
+    except Exception as e:
+        print(f"编辑区域计算出错: {e}")
+        return None, 0.1
+
+def calculate_metrics(before, after):
+    """计算图像对比指标"""
+    try:
+        # 统一转换为tensor
+        def to_tensor(image):
+            if isinstance(image, Image.Image):
+                tensor = transforms.ToTensor()(image) * 2 - 1
+            else:
+                tensor = image
+            return tensor.unsqueeze(0) if tensor.dim() == 3 else tensor
+        
+        before = to_tensor(before)
+        after = to_tensor(after)
+        
+        # 转换到[0,1]用于PSNR和SSIM
+        before_01 = (before + 1) / 2
+        after_01 = (after + 1) / 2
+        
+        # 计算编辑比例和mask
+        mask, edit_ratio = calculate_edit_analysis(before, after)
+        
+        # 计算SSIM
+        ssim_val = ssim(after_01, before_01, window_size=5)
+        ssim_score = torch.mean(ssim_val).item() if ssim_val.dim() > 0 else ssim_val.item()
+        
+        metrics = {
+            'psnr': psnr(after_01, before_01, max_val=1.0).item(),
+            'ssim': ssim_score,
+            'l1': F.l1_loss(after, before).item(),
+            'l2': F.mse_loss(after, before).item(),
+            'edit_ratio': edit_ratio
+        }
+        
+        return metrics, mask
+    except Exception as e:
+        print(f"指标计算出错: {e}")
+        return None, None
+
+def tensor_to_bgr(tensor):
+    """将tensor转换为BGR格式的numpy数组"""
+    np_img = ((tensor.detach().cpu() + 1) * 127.5).clamp(0, 255).byte().numpy()[0]
+    if np_img.shape[0] == 3:  # CHW -> HWC
+        np_img = np_img.transpose(1, 2, 0)
+    return cv2.cvtColor(np_img, cv2.COLOR_RGB2BGR)
+
+def create_metrics_overlay(metrics, width, height):
+    """创建包含指标信息的图像"""
+    img = np.zeros((height, width, 3), dtype=np.uint8)
+    
+    if not metrics:
+        return img
+    
+    font = cv2.FONT_HERSHEY_SIMPLEX
+    texts = [
+        f"PSNR: {metrics['psnr']:.2f}",
+        f"SSIM: {metrics['ssim']:.3f}",
+        f"L1: {metrics['l1']:.4f}",
+        f"L2: {metrics['l2']:.4f}",
+        f"Edit: {metrics['edit_ratio']:.3f}"
+    ]
+    
+    for i, text in enumerate(texts):
+        y_pos = 30 + i * 25
+        cv2.putText(img, text, (10, y_pos), font, 0.5, (255, 255, 255), 1, cv2.LINE_AA)
+    
+    return img
+
+def create_comparison_image(pipe, accelerator, original_img, wm_img, prompt, output_dir, step):
+    """
+    创建并保存包含8张图片的2x4对比图像
+    第一行：原图、原图的编辑图像A、A相比原图的编辑区域、A相比原图的残差
+    第二行：原图的水印图像、水印图像的编辑图像B、B相比原图的编辑区域、B相比原图的残差
+    """
+    os.makedirs(output_dir, exist_ok=True)
+    
+    # 生成编辑图像
+    with torch.no_grad():   
+        pipe.text_encoder.eval()
+        pipe.unet.eval()
+        pipe.vae.eval()
+        
+        generated_image_A = generate_image(args, pipe, prompt, original_img, accelerator, device=accelerator.device)
+        generated_image_B = generate_image(args, pipe, prompt, wm_img, accelerator, device=accelerator.device)
+        
+        pipe.text_encoder.train()
+        pipe.unet.train()
+        pipe.vae.train()
+    
+    # 计算指标和mask
+    metrics_A, mask_A = calculate_metrics(original_img, generated_image_A)
+    metrics_B, mask_B = calculate_metrics(original_img, generated_image_B)
+    
+    # 转换所有图像
+    images = [original_img, generated_image_A, generated_image_B, wm_img]
+    bgr_images = [tensor_to_bgr(img) for img in images]
+    original_bgr, gen_A_bgr, gen_B_bgr, wm_bgr = bgr_images
+    
+    h, w = original_bgr.shape[:2]
+    
+    # 处理mask和残差
+    mask_A_bgr = cv2.cvtColor(mask_A, cv2.COLOR_GRAY2BGR) if mask_A is not None else np.zeros((h, w, 3), dtype=np.uint8)
+    mask_B_bgr = cv2.cvtColor(mask_B, cv2.COLOR_GRAY2BGR) if mask_B is not None else np.zeros((h, w, 3), dtype=np.uint8)
+    
+    diff_A = cv2.absdiff(original_bgr, gen_A_bgr)
+    diff_B = cv2.absdiff(original_bgr, gen_B_bgr)
+    
+    # 创建指标图像
+    metrics_A_img = create_metrics_overlay(metrics_A, w, h)
+    metrics_B_img = create_metrics_overlay(metrics_B, w, h)
+    
+    # 创建网格
+    row1 = cv2.hconcat([original_bgr, gen_A_bgr, mask_A_bgr, diff_A, metrics_A_img])
+    row2 = cv2.hconcat([wm_bgr, gen_B_bgr, mask_B_bgr, diff_B, metrics_B_img])
+    comparison_grid = cv2.vconcat([row1, row2])
+    
+    # 添加标签
+    labels = ["Original", "Edit", "Mask", "Diff", "Metrics"]
+    label_bg = np.zeros((30, comparison_grid.shape[1], 3), dtype=np.uint8)
+    
+    for i, label in enumerate(labels):
+        x_pos = i * w + 10
+        cv2.putText(label_bg, label, (x_pos, 20), cv2.FONT_HERSHEY_SIMPLEX, 
+                   0.8, (255, 255, 255), 2, cv2.LINE_AA)
+    
+    final_image = cv2.vconcat([label_bg, comparison_grid])
+    
+    # 添加prompt文本
+    if prompt:
+        prompt_text = prompt[0] if isinstance(prompt, list) else str(prompt)
+        prompt_text = prompt_text.strip()
+        
+        # 创建文本背景
+        (text_width, text_height), baseline = cv2.getTextSize(prompt_text, cv2.FONT_HERSHEY_SIMPLEX, 0.7, 2)
+        text_bg_height = text_height + baseline + 30
+        text_bg = np.zeros((text_bg_height, final_image.shape[1], 3), dtype=np.uint8)
+        
+        cv2.putText(text_bg, prompt_text, (15, text_height + 15), cv2.FONT_HERSHEY_SIMPLEX, 
+                   0.7, (255, 255, 255), 2, cv2.LINE_AA)
+        
+        final_image = cv2.vconcat([final_image, text_bg])
+    
+    # 保存图像
+    output_path = os.path.join(output_dir, f"comparison_8grid_{step}.png")
+    cv2.imwrite(output_path, final_image)
+    
+    return output_path, metrics_A, metrics_B
+
 def setup_logging(args, logger):
     # 获取数据集名称和模型名称
     if args.enable_offline_filter:
-        data_name = args.train_data_dir.split(os.sep)[-4]
+        data_name = args.train_data_dir.split(os.sep)[-2]
         model_name = args.model_dir.split(os.sep)[-1]
     else:
-        data_name = args.train_data_dir.split(os.sep)[-3]
+        data_name = args.train_data_dir.split(os.sep)[-4]
         model_name = args.model_dir.split(os.sep)[-1]
 
     # 获取当前时间并构建输出目录
@@ -672,8 +844,6 @@ def save_all(g_model, save_dir, accelerator, args, wm_model_config, pipe, image,
             f.write(str(prompt[0]))
         else:
             f.write(str(prompt))
-    
-    logger.info("save models!")
 
     # 调用脚本，生成inference、频谱图、编辑区域图、log图
     image_file = './examples/Gadot.png'
@@ -779,6 +949,10 @@ def main(args):
     global_step = 0
     finished_flag = False
     
+    if args.enable_output_images:
+        metrics_A_list = []
+        metrics_B_list = []
+
     # 只在开启筛选时初始化统计变量
     if args.enable_online_filter:
         diff_values_all = []
@@ -807,7 +981,6 @@ def main(args):
                     with torch.no_grad():
                         generated_preview = generate_image(args, pipe, prompt, image, accelerator, device=device)
                         skip_flag = diff_image(image, generated_preview, method=args.filter_method)
-                        # diff_values_all.append(diff_value)
                         if skip_flag:
                             # 编辑区域过大，跳过这个样本
                             skipped_samples += 1
@@ -858,26 +1031,15 @@ def main(args):
                 dec_loss_after_edit = F.mse_loss(message, decoded_message_after_edit)
                 enc_loss = enc_pixel_loss + args.enc_latent_weight * enc_latent_loss
                 dec_loss = dec_loss_before_edit + args.decoder_weight * dec_loss_after_edit
-
-                # # 线性调整 enc_loss 系数
-                # enc_loss_coeff = 0.1 + 0.9 * min(global_step, args.max_train_steps) / args.max_train_steps
-                # loss = enc_loss_coeff * enc_loss + dec_loss
-                
-                # Curriculum-Style Weight Scheduling to Accelerate Convergence
-                # if args.enable_online_filter:
-                #     if global_step < 1000:
-                #         w_pix, w_lat, w_dec_bf, w_dec_af = 1, 0.001, 1., 0.001
-                #     else:
-                #         w = min(1., (global_step-1000)/6000)
-                #         w_pix, w_lat, w_dec_bf, w_dec_af = 1., 0.001, 1, 0.1*w
-                #     loss = (
-                #         w_pix * enc_pixel_loss +
-                #         w_lat * enc_latent_loss +
-                #         w_dec_bf * dec_loss_before_edit +
-                #         w_dec_af * dec_loss_after_edit
-                #     )
+                # 先让encoder收敛
+                # if global_step < 1000:
+                #     loss = enc_pixel_loss + args.enc_latent_weight * enc_latent_loss
+                #     loss += dec_loss_before_edit + 0.000001 * dec_loss_after_edit
                 # else:
+                #     loss = enc_pixel_loss + args.enc_latent_weight * enc_latent_loss
+                #     loss += dec_loss_before_edit + args.decoder_weight * dec_loss_after_edit
                 loss = enc_loss + dec_loss
+
 
                 accelerator.backward(loss)
                 if accelerator.sync_gradients:
@@ -935,7 +1097,12 @@ def main(args):
                         save_step_dir = os.path.join(output_with_time_dir, f"step{global_step}")
                         os.makedirs(save_step_dir, exist_ok=True)
                         save_all(wm_model, save_step_dir, accelerator, args, wm_model_config, pipe, image, wm_image, prompt, output_with_time_dir)
-
+                    
+                    if args.enable_output_images and global_step < 4000 and global_step % 10 == 0:
+                        _, metrics_A, metrics_B = create_comparison_image(pipe, accelerator, image, wm_image, prompt, output_with_time_dir+'/output_images', global_step)
+                        metrics_A_list.append(metrics_A)
+                        metrics_B_list.append(metrics_B)
+            
             if global_step >= args.max_train_steps:
                 finished_flag = True
                 break
@@ -971,19 +1138,31 @@ def main(args):
                 "skip_rate": final_skip_rate,
                 "avg_diff_value": final_avg_diff_value,
                 "filter_threshold": args.filter_threshold,
-                "realtime_filter_enabled": True,
-                "diff_values_distribution": {
-                    "min": float(np.min(diff_values_all)),
-                    "max": float(np.max(diff_values_all)),
-                    "mean": float(np.mean(diff_values_all)),
-                    "std": float(np.std(diff_values_all)),
-                    "median": float(np.median(diff_values_all)),
-                }
+                "realtime_filter_enabled": True
             }
             
             with open(final_stats_file, "w") as f:
                 json.dump(stats, f, indent=2, ensure_ascii=False)
 
+        # 保存metrics_A和metrics_B
+        if args.enable_output_images:
+            # 计算metrics_A的各项指标均值
+            metrics_A_psnr = np.mean([m['psnr'] for m in metrics_A_list])
+            metrics_A_ssim = np.mean([m['ssim'] for m in metrics_A_list])
+            metrics_A_l1 = np.mean([m['l1'] for m in metrics_A_list])
+            metrics_A_l2 = np.mean([m['l2'] for m in metrics_A_list])
+            metrics_A_edit_ratio = np.mean([m['edit_ratio'] for m in metrics_A_list])
+            
+            # 计算metrics_B的各项指标均值
+            metrics_B_psnr = np.mean([m['psnr'] for m in metrics_B_list])
+            metrics_B_ssim = np.mean([m['ssim'] for m in metrics_B_list])
+            metrics_B_l1 = np.mean([m['l1'] for m in metrics_B_list])
+            metrics_B_l2 = np.mean([m['l2'] for m in metrics_B_list])
+            metrics_B_edit_ratio = np.mean([m['edit_ratio'] for m in metrics_B_list])
+            
+            logger.info(f"metrics_A - PSNR: {metrics_A_psnr:.4f}, SSIM: {metrics_A_ssim:.4f}, L1: {metrics_A_l1:.4f}, L2: {metrics_A_l2:.4f}, Edit Ratio: {metrics_A_edit_ratio:.4f}")
+            logger.info(f"metrics_B - PSNR: {metrics_B_psnr:.4f}, SSIM: {metrics_B_ssim:.4f}, L1: {metrics_B_l1:.4f}, L2: {metrics_B_l2:.4f}, Edit Ratio: {metrics_B_edit_ratio:.4f}")
+            
     accelerator.end_training()
 
     # 只在主进程执行，结束训练后自动调用绘图脚本
@@ -991,6 +1170,7 @@ def main(args):
         log_file_path = os.path.join(output_with_time_dir, "log.txt")
         logger.info(f"训练结束，开始生成绘图，日志路径: {log_file_path}")
         os.system(f"python custom/log2plt.py -l {log_file_path}")
+    
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
@@ -1019,5 +1199,6 @@ if __name__ == "__main__":
     parser.add_argument("--enable_online_filter", action="store_true", default=False, help="Enable real-time filtering")
     parser.add_argument("--filter_method", type=str, default="edit_ratio", help="Method for filtering out samples")
     parser.add_argument("--enable_offline_filter", action="store_true", default=False, help="Enable offline filtering")
+    parser.add_argument("--enable_output_images", action="store_true", default=False, help="Enable output images")
     args = parser.parse_args()
     main(args)

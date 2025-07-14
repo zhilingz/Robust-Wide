@@ -29,7 +29,7 @@ nvidia-smi --query-gpu=gpu_name --format=csv,noheader
 
 # 数据集和模型配置
 DATA_ID=0  # 通过修改这个数字来选择数据集
-MODEL_ID=1  # 通过修改这个数字来选择模型
+MODEL_ID=0  # 通过修改这个数字来选择模型
 declare -a DATASETS=(
     "/public/zhangzhiling/datasets/timbrooks___instructpix2pix-clip-filtered/default/0.0.0/aa665b890915f7a42f8615bee868a9f3447e178f"
     "/public/zhangzhiling/datasets/BleachNick___ultra_edit_500k/default/0.0.0/8d78dc552b576027618ff2170c4c1d7bcaf27ad2"
@@ -45,8 +45,10 @@ declare -a MODELS=(
     "black-forest-labs/FLUX.1-Fill-dev"
 )
 
-# DATA_DIR=${DATASETS[$DATA_ID]}
-DATA_DIR="filtered_datasets/max1000/timbrooks___instructpix2pix-clip-filtered/magicbrush-jul7"
+
+# DATA_DIR="filtered_datasets/max1000_id/timbrooks___instructpix2pix-clip-filtered/magicbrush-jul7"
+# DATA_DIR="filtered_datasets/max1000_id/timbrooks___instructpix2pix-clip-filtered/instruct-pix2pix"
+DATA_DIR=${DATASETS[$DATA_ID]}
 MODEL_DIR=${MODELS[$MODEL_ID]}
 echo "数据集路径: $DATA_DIR"
 echo "模型路径: $MODEL_DIR"
@@ -67,7 +69,7 @@ accelerate launch --config_file ./config/accelerate_config.yaml train.py \
   --wm_model_config "./config/model_config.yaml" \
   --output_dir "./train_results" \
   --image_size 512 \
-  --train_size 20000 \
+  --train_size 1000 \
   --test_size 1200 \
   --batch_size $BATCH_SIZE \
   --max_train_steps 20000 \
@@ -81,6 +83,6 @@ accelerate launch --config_file ./config/accelerate_config.yaml train.py \
   --decoder_weight 0.1 \
   --enc_latent_weight 0.001 \
   --gradient_accumulation_steps 1 \
-  --enable_offline_filter \
-
+  --enable_output_images \
+  # --enable_offline_filter \
 echo "job end"

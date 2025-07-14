@@ -14,7 +14,7 @@ echo "job begin"
 # 打印 SBATCH 提交参数
 scontrol show job ${SLURM_JOB_ID}
 # 输出当前时间（上海市区时间）
-echo "Current time: $(TZ='Asia/Shanghai' date)"
+echo "Current time: $(TZ='Asia/Shanghai' date +"%Y-%m-%d %H:%M:%S %Z")"
 
 conda activate Robust-Wide
 
@@ -41,7 +41,7 @@ declare -a MODELS=(
 
 DATA_DIR=${DATASETS[$DATA_ID]}
 MODEL_DIR=${MODELS[$MODEL_ID]}
-OUTPUT_DIR="./filtered_datasets/minmax10000_l2_0.01/"
+OUTPUT_DIR="./filtered_datasets/max10000_id/"
 
 python -m custom.filter --filter_num 10000 \
     --data_dir $DATA_DIR \
@@ -49,3 +49,5 @@ python -m custom.filter --filter_num 10000 \
     --output_dir $OUTPUT_DIR
 
 echo "job end"
+
+# sbatch custom/filter.sh 运行脚本

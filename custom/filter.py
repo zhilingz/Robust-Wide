@@ -58,7 +58,7 @@ class ImageFilter:
         self.model_dir = model_dir
         self.weight_dtype = weight_dtype
         self.thresholds = {
-            'psnr': 20.0, 'ssim': 0.80, 'l1': 0.1, 'l2': 0.01, 'edit_ratio': 0.20 # 'edit_ratio_max': 0.20, 'edit_ratio_min': 0.10
+            'psnr': 20.0, 'ssim': 0.80, 'l1': 0.1, 'l2': 0.03, 'edit_ratio': 0.20 # 'edit_ratio_max': 0.20, 'edit_ratio_min': 0.10
         }
         self.pipe = self.initialize_pipeline()
 
@@ -234,7 +234,7 @@ class ImageFilter:
         """
         创建包含原图、生成图和mask的合并图像，并在图像上添加prompt文本
         """
-        try:
+        try:     
             # 转换原图为numpy格式 (BGR for OpenCV)
             if isinstance(original_image, PILImage.Image):
                 original_cv = cv2.cvtColor(np.array(original_image), cv2.COLOR_RGB2BGR)
@@ -314,9 +314,10 @@ class ImageFilter:
         numpy_image = (numpy_image * 255).astype(np.uint8)
         return PILImage.fromarray(numpy_image)
 
-    def filter_and_save_dataset(self, dataset, output_dir, filter_num):
+    def filter_and_save_dataset(self, dataset, output_dir, filter_num, original_dataset_path=None):
         """
         合并的数据集筛选、日志记录和保存函数
+        只保存通过筛选的样本ID，不保存实际图片和prompt
         """
         pass_count = 0
         total_samples = len(dataset)
@@ -326,19 +327,15 @@ class ImageFilter:
         
         # 创建输出目录
         os.makedirs(output_dir, exist_ok=True)
-        images_dir = os.path.join(output_dir, "images")
-        os.makedirs(images_dir, exist_ok=True)
-        generated_images_dir = os.path.join(output_dir, "generated_images")
-        os.makedirs(generated_images_dir, exist_ok=True)
         
         logger.info(f"开始筛选数据集，总样本数: {total_samples}")
         logger.info(f"筛选阈值: {self.thresholds}")
         logger.info(f"输出目录: {output_dir}")
         
-        # 初始化保存数据结构
+        # 初始化保存数据结构 - 只保存样本ID和指标
         saved_data = {
-            "edit_prompt": [],
-            "all": [],
+            "filtered_sample_ids": [],  # 保存通过筛选的样本ID
+            "original_dataset_path": original_dataset_path,  # 保存原始数据集路径
             "filter_stats": {}
         }
         
@@ -411,25 +408,14 @@ class ImageFilter:
                         ])
                   
                 if passed:
-                    # 保存通过筛选的样本
+                    # 只保存样本ID和指标，不保存图片
                     pass_count += 1
-                    
                     all_metrics.append(metrics)
 
-                    # 保存图片
-                    image_dir = os.path.join(images_dir, f"{pass_count-1:06d}.png")
-                    image.save(image_dir)
-
-                    generated_image_dir = os.path.join(generated_images_dir, f"{pass_count-1:06d}.png")
-                    comparison_image = self.create_comparison_image(image, generated_image, mask, prompt)
-                    cv2.imwrite(generated_image_dir, comparison_image)
-
-                    # 添加到保存数据
-                    saved_data["edit_prompt"].append(prompt)
-                    saved_data["all"].append({
-                        "image_path": image_dir,
-                        "generated_image_path": generated_image_dir,
-                        **metrics
+                    # 保存样本ID和指标信息
+                    saved_data["filtered_sample_ids"].append({
+                        "sample_id": i,  # 原始数据集中的索引
+                        "metrics": metrics
                     })
 
                     # 记录详细日志
@@ -479,10 +465,13 @@ class ImageFilter:
         
         # 保存最终元数据
         if pass_count > 0:
+            # 确保保存原始数据集路径
+            saved_data["original_dataset_path"] = original_dataset_path
+            
             with open(os.path.join(output_dir, "metadata.json"), 'w', encoding='utf-8') as f:
                 json.dump(saved_data, f, ensure_ascii=False, indent=2)
             
-            logger.info(f"已保存 {pass_count} 个筛选后的样本到 {output_dir}")
+            logger.info(f"已保存 {pass_count} 个筛选后的样本ID到 {output_dir}")
         else:
             logger.warning("没有样本通过筛选，未保存任何文件")
         
@@ -506,20 +495,14 @@ def load_dataset_simple(dataset_dir):
     return combined_dataset
 
 def load_filtered_dataset(data_dir):
+    """
+    从筛选后的数据集中加载样本ID信息
+    """
     with open(os.path.join(data_dir, "metadata.json"), 'r', encoding='utf-8') as f:
         metadata = json.load(f)
     
-    dataset_dict = {
-        "edit_prompt": metadata["edit_prompt"],
-        "original_image": [os.path.join(data_dir, "images", path) for path in metadata["image_path"]]
-    }
-    
-    features = Features({
-        "edit_prompt": Value("string"),
-        "original_image": Image()
-    })
-    
-    return Dataset.from_dict(dataset_dict, features=features)
+    # 返回筛选后的样本ID列表
+    return metadata["filtered_sample_ids"]
 
 def main():
     parser = argparse.ArgumentParser()
@@ -549,7 +532,7 @@ def main():
     }
     logger.info("筛选配置:")
     logger.info(json.dumps(config, indent=2, ensure_ascii=False))
-    
+    logger.info(f"SLURM_JOB_ID: {os.environ.get('SLURM_JOB_ID', '')}")
     if device == "cuda":
         torch.cuda.empty_cache()
     
@@ -557,16 +540,19 @@ def main():
     dataset = load_dataset_simple(data_dir)
     image_filter = ImageFilter(model_dir=model_dir, device=device)
     
+    # 在metadata中保存原始数据集路径
+    image_filter.original_dataset_path = data_dir
+    
     # 使用带日志记录的筛选函数
-    image_filter.filter_and_save_dataset(dataset, output_dir, filter_num)
+    image_filter.filter_and_save_dataset(dataset, output_dir, filter_num, original_dataset_path=data_dir)
 
     print("\n测试加载筛选后的数据集...")
-    loaded_dataset = load_filtered_dataset(output_dir)
-    print(f"加载成功，大小: {len(loaded_dataset)}")
+    filtered_sample_ids = load_filtered_dataset(output_dir)
+    print(f"加载成功，筛选后的样本数: {len(filtered_sample_ids)}")
     
-    for i in range(min(3, len(loaded_dataset))):
-        example = loaded_dataset[i]
-        print(f"样本 {i+1}: {example['edit_prompt'][:50]}...")
+    # 显示前几个样本的ID
+    for i, sample_info in enumerate(filtered_sample_ids[:3]):
+        print(f"样本 {i+1}: 原始数据集索引 {sample_info['sample_id']}, PSNR: {sample_info['metrics']['psnr']:.2f}")
 
 if __name__ == "__main__":
     main()
