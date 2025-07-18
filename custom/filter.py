@@ -58,7 +58,7 @@ class ImageFilter:
         self.model_dir = model_dir
         self.weight_dtype = weight_dtype
         self.thresholds = {
-            'psnr': 20.0, 'ssim': 0.80, 'l1': 0.1, 'l2': 0.03, 'edit_ratio': 0.20 # 'edit_ratio_max': 0.20, 'edit_ratio_min': 0.10
+            'psnr': 12.5, 'ssim': 0.80, 'l1': 0.1, 'l2': 0.03, 'edit_ratio': 0.20 # 'edit_ratio_max': 0.20, 'edit_ratio_min': 0.10
         }
         self.pipe = self.initialize_pipeline()
 
@@ -110,64 +110,54 @@ class ImageFilter:
         return pipe
 
     def generate_image(self, prompt, image, seed=42):
-        try:
-            generator = torch.Generator(device=self.device).manual_seed(seed)
-            
-            if isinstance(image, PILImage.Image):
-                image = transforms.ToTensor()(image).unsqueeze(0) * 2 - 1
-                image = image.to(self.device)
+        generator = torch.Generator(device=self.device).manual_seed(seed)
+
+        with torch.no_grad():
+            if "instruct-pix2pix-distill" in self.model_dir:
+                generated_image = self.pipe(
+                    prompt, 
+                    image=image, 
+                    num_images_per_prompt=1, 
+                    num_inference_steps=4,  # 4改为2，测试效果
+                    guidance_scale=2.0,     # 使用较小的guidance_scale
+                    image_guidance_scale=1.0,  # 使用较小的image_guidance_scale
+                    generator=generator,
+                    output_type="pt"
+                )
+            elif "sd-turbo" in self.model_dir:
+                generated_image = self.pipe(
+                    prompt, 
+                    image=image, 
+                    num_images_per_prompt=1, 
+                    num_inference_steps=2,
+                    guidance_scale=0.0, 
+                    strength=0.5,
+                    generator=generator,
+                    output_type="pt"
+                ).images     # pipe返回值为StableDiffusionPipelineOutput 类型，需要取images，形状 (1, C, H, W)
+                generated_image = 2 * generated_image - 1 # 将值域从[-1,1]转为[0,1]，防止图片泛白
+            elif "magicbrush" in self.model_dir:
+                generated_image = self.pipe(
+                    prompt, 
+                    image=image, 
+                    num_inference_steps=20, 
+                    image_guidance_scale=2.0, 
+                    guidance_scale=4, 
+                    generator=generator,
+                    output_type="pt",
+                    )
             else:
-                image = image.to(self.device)
-            
-            with torch.no_grad():
-                if "instruct-pix2pix-distill" in self.model_dir:
-                    generated_image = self.pipe(
-                        prompt, 
-                        image=image, 
-                        num_images_per_prompt=1, 
-                        num_inference_steps=4,  # 4改为2，测试效果
-                        guidance_scale=2.0,     # 使用较小的guidance_scale
-                        image_guidance_scale=1.0,  # 使用较小的image_guidance_scale
-                        generator=generator,
-                        output_type="pt"
-                    )
-                elif "sd-turbo" in self.model_dir:
-                    generated_image = self.pipe(
-                        prompt, 
-                        image=image, 
-                        num_images_per_prompt=1, 
-                        num_inference_steps=2,
-                        guidance_scale=0.0, 
-                        strength=0.5,
-                        generator=generator,
-                        output_type="pt"
-                    ).images     # pipe返回值为StableDiffusionPipelineOutput 类型，需要取images，形状 (1, C, H, W)
-                    generated_image = 2 * generated_image - 1 # 将值域从[-1,1]转为[0,1]，防止图片泛白
-                elif "magicbrush" in self.model_dir:
-                    generated_image = self.pipe(
-                        prompt, 
-                        image=image, 
-                        num_inference_steps=20, 
-                        image_guidance_scale=2.0, 
-                        guidance_scale=4, 
-                        generator=generator,
-                        output_type="pt",
-                        )
-                else:
-                    generated_image = self.pipe(
-                        prompt, 
-                        image=image, 
-                        num_images_per_prompt=1, 
-                        num_inference_steps=20,
-                        guidance_scale=10, 
-                        image_guidance_scale=1.5, # 1.5原图保留太少（62.98%的编辑区域），2.0还可以（38.45%的编辑区域）
-                        generator=generator,
-                        output_type="pt",
-                    )
-            return generated_image
-        except Exception as e:
-            print(f"图像生成出错: {e}")
-            return None
+                generated_image = self.pipe(
+                    prompt, 
+                    image=image, 
+                    num_images_per_prompt=1, 
+                    num_inference_steps=20,
+                    guidance_scale=10, 
+                    image_guidance_scale=1.5, # 1.5原图保留太少（62.98%的编辑区域），2.0还可以（38.45%的编辑区域）
+                    generator=generator,
+                    output_type="pt",
+                )
+        return generated_image
     
     def _to_tensor(self, image):
         """统一转换为设备上的tensor"""
@@ -180,121 +170,108 @@ class ImageFilter:
         return tensor.unsqueeze(0) if tensor.dim() == 3 else tensor
     
     def calculate_edit_ratio(self, before, after, thresh=15, kernel=3):
-        try:
-            # 转换为numpy进行opencv操作
-            before_np = ((before.detach().cpu() + 1) * 127.5).clamp(0, 255).byte().numpy()[0].transpose(1, 2, 0)
-            after_np = ((after.detach().cpu() + 1) * 127.5).clamp(0, 255).byte().numpy()[0].transpose(1, 2, 0)
-            
-            # 计算颜色差异
-            diff = np.abs(after_np.astype(np.int16) - before_np.astype(np.int16))
-            color_diff = np.max(diff, axis=2).astype(np.uint8)
-            
-            # 二值化和形态学处理
-            _, mask = cv2.threshold(color_diff, thresh, 255, cv2.THRESH_BINARY)
-            kernel_elem = cv2.getStructuringElement(cv2.MORPH_RECT, (kernel, kernel))
-            mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel_elem, iterations=1)
-            
-            return mask.sum() / 255 / mask.size, mask
-        except Exception as e:
-            print(f"编辑区域占比计算出错: {e}")
-            return 0.1
+        # 转换为numpy进行opencv操作
+        before_np = ((before.detach().cpu() + 1) * 127.5).clamp(0, 255).byte().numpy()[0].transpose(1, 2, 0)
+        after_np = ((after.detach().cpu() + 1) * 127.5).clamp(0, 255).byte().numpy()[0].transpose(1, 2, 0)
+        
+        # 计算颜色差异
+        diff = np.abs(after_np.astype(np.int16) - before_np.astype(np.int16))
+        color_diff = np.max(diff, axis=2).astype(np.uint8)
+        
+        # 二值化和形态学处理
+        _, mask = cv2.threshold(color_diff, thresh, 255, cv2.THRESH_BINARY)
+        kernel_elem = cv2.getStructuringElement(cv2.MORPH_RECT, (kernel, kernel))
+        mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel_elem, iterations=1)
+        
+        return mask.sum() / 255 / mask.size, mask
+
         
     def calculate_metrics(self, before, after):
-        try:
-            before = self._to_tensor(before)
-            after = self._to_tensor(after)
-            
-            # 转换到[0,1]用于PSNR和SSIM
-            before_01 = (before + 1) / 2
-            after_01 = (after + 1) / 2
-            
-            # 计算编辑比例和mask
-            edit_ratio, mask = self.calculate_edit_ratio(before, after)
-            
-            metrics = {
-                'psnr': psnr(after_01, before_01, max_val=1.0).item(),
-                'l1': F.l1_loss(after, before).item(),
-                'l2': F.mse_loss(after, before).item(),
-                'edit_ratio': edit_ratio
-            }
-            
-            # SSIM计算
-            try:
-                ssim_val = ssim(after_01, before_01, window_size=5)
-                metrics['ssim'] = torch.mean(ssim_val).item() if ssim_val.dim() > 0 else ssim_val.item()
-            except:
-                metrics['ssim'] = 0.5
-            
-            return metrics, mask
-        except Exception as e:
-            print(f"指标计算出错: {e}")
-            return None, None
+        before = self._to_tensor(before)
+        after = self._to_tensor(after)
+        
+        # 转换到[0,1]用于PSNR和SSIM
+        before_01 = (before + 1) / 2
+        after_01 = (after + 1) / 2
+        
+        # 计算编辑比例和mask
+        edit_ratio, mask = self.calculate_edit_ratio(before, after)
+        
+        metrics = {
+            'psnr': psnr(after_01, before_01, max_val=1.0).item(),
+            'l1': F.l1_loss(after, before).item(),
+            'l2': F.mse_loss(after, before).item(),
+            'edit_ratio': edit_ratio
+        }
+        
+        # SSIM计算
+        ssim_val = ssim(after_01, before_01, window_size=5)
+        metrics['ssim'] = torch.mean(ssim_val).item() if ssim_val.dim() > 0 else ssim_val.item()
+        
+        return metrics, mask
+
     
     def create_comparison_image(self, original_image, generated_image, mask, prompt=None):
         """
         创建包含原图、生成图和mask的合并图像，并在图像上添加prompt文本
-        """
-        try:     
-            # 转换原图为numpy格式 (BGR for OpenCV)
-            if isinstance(original_image, PILImage.Image):
-                original_cv = cv2.cvtColor(np.array(original_image), cv2.COLOR_RGB2BGR)
-            else:
-                original_cv = cv2.cvtColor(np.array(original_image), cv2.COLOR_RGB2BGR)
+        """  
+        # 转换原图为numpy格式 (BGR for OpenCV)
+        if isinstance(original_image, PILImage.Image):
+            original_cv = cv2.cvtColor(np.array(original_image), cv2.COLOR_RGB2BGR)
+        else:
+            original_cv = cv2.cvtColor(np.array(original_image), cv2.COLOR_RGB2BGR)
+        
+        # 转换生成图为numpy格式 (BGR for OpenCV)
+        generated_np = ((generated_image.squeeze(0).detach().cpu() + 1) * 127.5).clamp(0, 255).byte().numpy()
+        if generated_np.shape[0] == 3:  # CHW -> HWC
+            generated_np = generated_np.transpose(1, 2, 0)
+        generated_cv = cv2.cvtColor(generated_np, cv2.COLOR_RGB2BGR)
+        
+        # 调整图像大小以匹配
+        h, w = original_cv.shape[:2]
+        generated_cv = cv2.resize(generated_cv, (w, h))
+        
+        # 处理mask
+        if mask is not None:
+            mask_resized = cv2.resize(mask, (w, h))
+            # 将单通道mask转换为三通道以便拼接
+            mask_bgr = cv2.cvtColor(mask_resized, cv2.COLOR_GRAY2BGR)
+        else:
+            # 如果没有mask，创建一个空白的mask
+            mask_bgr = np.zeros_like(original_cv)
+        
+        # 水平拼接：原图 | 生成图 | mask
+        comparison = cv2.hconcat([original_cv, generated_cv, mask_bgr])
+        
+        # 如果有prompt，在图像底部添加文本
+        if prompt:
+            prompt = prompt.strip()
             
-            # 转换生成图为numpy格式 (BGR for OpenCV)
-            generated_np = ((generated_image.squeeze(0).detach().cpu() + 1) * 127.5).clamp(0, 255).byte().numpy()
-            if generated_np.shape[0] == 3:  # CHW -> HWC
-                generated_np = generated_np.transpose(1, 2, 0)
-            generated_cv = cv2.cvtColor(generated_np, cv2.COLOR_RGB2BGR)
+            # 文本样式设置
+            font = cv2.FONT_HERSHEY_SIMPLEX
+            font_scale = 0.7
+            thickness = 2
+            text_color = (255, 255, 255)  # 白色文字
+            bg_color = (0, 0, 0)  # 黑色背景
             
-            # 调整图像大小以匹配
-            h, w = original_cv.shape[:2]
-            generated_cv = cv2.resize(generated_cv, (w, h))
+            # 计算文本大小
+            (text_width, text_height), baseline = cv2.getTextSize(prompt, font, font_scale, thickness)
             
-            # 处理mask
-            if mask is not None:
-                mask_resized = cv2.resize(mask, (w, h))
-                # 将单通道mask转换为三通道以便拼接
-                mask_bgr = cv2.cvtColor(mask_resized, cv2.COLOR_GRAY2BGR)
-            else:
-                # 如果没有mask，创建一个空白的mask
-                mask_bgr = np.zeros_like(original_cv)
+            # 创建文本背景区域，添加一些padding
+            padding = 15
+            text_bg_height = text_height + baseline + padding * 2
+            text_bg = np.full((text_bg_height, comparison.shape[1], 3), bg_color, dtype=np.uint8)
             
-            # 水平拼接：原图 | 生成图 | mask
-            comparison = cv2.hconcat([original_cv, generated_cv, mask_bgr])
+            # 在文本背景上绘制文本（居中显示）
+            text_x = padding
+            text_y = text_height + padding
+            cv2.putText(text_bg, prompt, (text_x, text_y), font, font_scale, 
+                        text_color, thickness, cv2.LINE_AA)
             
-            # 如果有prompt，在图像底部添加文本
-            if prompt:
-                prompt = prompt.strip()
-                
-                # 文本样式设置
-                font = cv2.FONT_HERSHEY_SIMPLEX
-                font_scale = 0.7
-                thickness = 2
-                text_color = (255, 255, 255)  # 白色文字
-                bg_color = (0, 0, 0)  # 黑色背景
-                
-                # 计算文本大小
-                (text_width, text_height), baseline = cv2.getTextSize(prompt, font, font_scale, thickness)
-                
-                # 创建文本背景区域，添加一些padding
-                padding = 15
-                text_bg_height = text_height + baseline + padding * 2
-                text_bg = np.full((text_bg_height, comparison.shape[1], 3), bg_color, dtype=np.uint8)
-                
-                # 在文本背景上绘制文本（居中显示）
-                text_x = padding
-                text_y = text_height + padding
-                cv2.putText(text_bg, prompt, (text_x, text_y), font, font_scale, 
-                           text_color, thickness, cv2.LINE_AA)
-                
-                # 将文本区域添加到比较图像的底部
-                comparison = cv2.vconcat([comparison, text_bg])
-            
-            return comparison
-        except Exception as e:
-            print(f"创建对比图像出错: {e}")
-            return None
+            # 将文本区域添加到比较图像的底部
+            comparison = cv2.vconcat([comparison, text_bg])
+        
+        return comparison
 
     def tensor_to_pil(self, tensor):
         """将tensor转换为PIL图像"""
@@ -379,65 +356,75 @@ class ImageFilter:
             # 筛选filter_num个样本
             if pass_count >= filter_num:
                 break
-            try:
-                # 查找图像和提示键
-                image_key = next((k for k in ["original_image", "source_image", "source_img", "image"] if k in example), None)
-                prompt_key = next((k for k in ["edit_prompt", "instruction"] if k in example), None)
-                if not image_key or not prompt_key:
-                    logger.warning(f"样本 {i}: 缺少必要的键 (image_key: {image_key}, prompt_key: {prompt_key})")
-                    continue
-                image, prompt = example[image_key], example[prompt_key]
 
-                generated_image = self.generate_image(prompt, image)
-                if generated_image is None:
-                    logger.warning(f"样本 {i}: 图像生成失败")
-                    continue
-                
-                metrics, mask = self.calculate_metrics(image, generated_image)
-                if metrics is None:
-                    logger.warning(f"样本 {i}: 指标计算失败")
-                    continue
-
-                passed = all([metrics['psnr'] >= self.thresholds['psnr'],
-                            metrics['ssim'] >= self.thresholds['ssim'],
-                            metrics['l1'] <= self.thresholds['l1'],
-                            metrics['l2'] <= self.thresholds['l2'],
-                            # metrics['edit_ratio'] <= self.thresholds['edit_ratio_max'],
-                            # metrics['edit_ratio'] >= self.thresholds['edit_ratio_min']
-                            metrics['edit_ratio'] <= self.thresholds['edit_ratio']
-                        ])
-                  
-                if passed:
-                    # 只保存样本ID和指标，不保存图片
-                    pass_count += 1
-                    all_metrics.append(metrics)
-
-                    # 保存样本ID和指标信息
-                    saved_data["filtered_sample_ids"].append({
-                        "sample_id": i,  # 原始数据集中的索引
-                        "metrics": metrics
-                    })
-
-                    # 记录详细日志
-                    log_dict = {
-                        "sample_idx": i,
-                        "psnr": metrics['psnr'],
-                        "ssim": metrics['ssim'],
-                        "l1": metrics['l1'],
-                        "l2": metrics['l2'],
-                        "edit_ratio": metrics['edit_ratio'],
-                        "pass_rate": pass_count / (i + 1)
-                    }
-                    logger.info(log_dict)
-                
-                # 每处理10000个样本保存一次metadata（无论是否通过筛选）
-                if (i + 1) % 10000 == 0:
-                    save_metadata_checkpoint(pass_count, all_metrics, i + 1)
-                    
-            except Exception as e:
-                logger.error(f"样本 {i} 处理出错: {e}")                
+            # 查找图像和提示键
+            image_key = next((k for k in ["original_image", "source_image", "source_img", "image"] if k in example), None)
+            prompt_key = next((k for k in ["edit_prompt", "instruction"] if k in example), None)
+            if not image_key or not prompt_key:
+                logger.warning(f"样本 {i}: 缺少必要的键 (image_key: {image_key}, prompt_key: {prompt_key})")
                 continue
-        
+            image, prompt = example[image_key], example[prompt_key]
+                    
+            # 先将图像resize到512*512
+            if isinstance(image, PILImage.Image):
+                # 如果是PIL图像，先resize
+                image = image.resize((512, 512), PILImage.Resampling.LANCZOS)
+                image = transforms.ToTensor()(image).unsqueeze(0) * 2 - 1
+                image = image.to(self.device)
+            else:
+                # 如果是tensor，先resize
+                if image.dim() == 3:
+                    image = image.unsqueeze(0)  # 添加batch维度
+                # 使用F.interpolate进行resize
+                image = F.interpolate(image, size=(512, 512), mode='bilinear', align_corners=False)
+                image = image.to(self.device)
+            
+            generated_image = self.generate_image(prompt, image)
+            if generated_image is None:
+                logger.warning(f"样本 {i}: 图像生成失败")
+                continue
+            
+            metrics, mask = self.calculate_metrics(image, generated_image)
+            if metrics is None:
+                logger.warning(f"样本 {i}: 指标计算失败")
+                continue
+
+            passed = all([metrics['psnr'] >= self.thresholds['psnr'],
+                        # metrics['ssim'] >= self.thresholds['ssim'],
+                        # metrics['l1'] <= self.thresholds['l1'],
+                        # metrics['l2'] <= self.thresholds['l2'],
+                        # # metrics['edit_ratio'] <= self.thresholds['edit_ratio_max'],
+                        # # metrics['edit_ratio'] >= self.thresholds['edit_ratio_min']
+                        # metrics['edit_ratio'] <= self.thresholds['edit_ratio']
+                    ])
+                
+            if passed:
+                # 只保存样本ID和指标，不保存图片
+                pass_count += 1
+                all_metrics.append(metrics)
+
+                # 保存样本ID和指标信息
+                saved_data["filtered_sample_ids"].append({
+                    "sample_id": i,  # 原始数据集中的索引
+                    "metrics": metrics
+                })
+
+                # 记录详细日志
+                log_dict = {
+                    "sample_idx": i,
+                    "psnr": metrics['psnr'],
+                    "ssim": metrics['ssim'],
+                    "l1": metrics['l1'],
+                    "l2": metrics['l2'],
+                    "edit_ratio": metrics['edit_ratio'],
+                    "pass_rate": pass_count / (i + 1)
+                }
+                logger.info(log_dict)
+            
+            # 每处理10000个样本保存一次metadata（无论是否通过筛选）
+            if (i + 1) % 10000 == 0:
+                save_metadata_checkpoint(pass_count, all_metrics, i + 1)
+
         # 最终统计
         final_stats = {}
         

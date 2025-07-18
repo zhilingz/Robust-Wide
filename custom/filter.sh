@@ -22,7 +22,7 @@ conda activate Robust-Wide
 nvidia-smi --query-gpu=gpu_name --format=csv,noheader
 
 # 数据集和模型配置
-DATA_ID=0  # 通过修改这个数字来选择数据集
+DATA_ID=2  # 通过修改这个数字来选择数据集
 MODEL_ID=1  # 通过修改这个数字来选择模型
 declare -a DATASETS=(
     "/public/zhangzhiling/datasets/timbrooks___instructpix2pix-clip-filtered/default/0.0.0/aa665b890915f7a42f8615bee868a9f3447e178f"
@@ -41,9 +41,9 @@ declare -a MODELS=(
 
 DATA_DIR=${DATASETS[$DATA_ID]}
 MODEL_DIR=${MODELS[$MODEL_ID]}
-OUTPUT_DIR="./filtered_datasets/max10000_id/"
+OUTPUT_DIR="./filtered_datasets/max20000_id_psnr12.5/"
 
-python -m custom.filter --filter_num 10000 \
+python -m custom.filter --filter_num 20000 \
     --data_dir $DATA_DIR \
     --model_dir $MODEL_DIR\
     --output_dir $OUTPUT_DIR
