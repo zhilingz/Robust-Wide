@@ -46,7 +46,7 @@ declare -a MODELS=(
 )
 
 
-DATA_DIR="filtered_datasets/max20000_id_psnr12.5/osunlp___magic_brush/magicbrush-jul7"
+DATA_DIR="filtered_datasets/max20000_id_psnr12.5/facebook___emu_edit_test_set/magicbrush-jul7"
 # DATA_DIR="filtered_datasets/max1000_id/timbrooks___instructpix2pix-clip-filtered/instruct-pix2pix"
 # DATA_DIR=${DATASETS[$DATA_ID]}
 MODEL_DIR=${MODELS[$MODEL_ID]}

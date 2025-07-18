@@ -4,6 +4,8 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 from datasets import load_dataset, Dataset, Features, Value, Image, concatenate_datasets
+from torch.utils.data import DataLoader
+from dataset import collate_fn
 from PIL import Image as PILImage
 from torchvision import transforms
 from kornia.metrics import psnr, ssim
@@ -13,6 +15,8 @@ import datetime
 import pytz
 import argparse
 from custom.custom_insp2p import CustomStableDiffusionInstructPix2PixPipeline
+from dataset import preprocess_train
+from functools import partial
 
 # 设置日志记录器
 logger = logging.getLogger(__name__)
@@ -298,7 +302,14 @@ class ImageFilter:
         """
         pass_count = 0
         total_samples = len(dataset)
-        
+        train_dataloader = DataLoader(
+            dataset,
+            batch_size=1,
+            drop_last=True,
+            shuffle=True,
+            collate_fn=collate_fn,
+        )
+
         # 统计指标
         all_metrics = []
         
@@ -352,78 +363,61 @@ class ImageFilter:
             
             logger.info(f"已保存检查点 - 处理样本: {processed_samples}, 通过筛选: {current_pass_count}")
         
-        for i, example in enumerate(dataset):
-            # 筛选filter_num个样本
-            if pass_count >= filter_num:
-                break
+        with torch.no_grad():
+            for i, example in enumerate(train_dataloader):
+                # 筛选filter_num个样本
+                if pass_count >= filter_num:
+                    break
 
-            # 查找图像和提示键
-            image_key = next((k for k in ["original_image", "source_image", "source_img", "image"] if k in example), None)
-            prompt_key = next((k for k in ["edit_prompt", "instruction"] if k in example), None)
-            if not image_key or not prompt_key:
-                logger.warning(f"样本 {i}: 缺少必要的键 (image_key: {image_key}, prompt_key: {prompt_key})")
-                continue
-            image, prompt = example[image_key], example[prompt_key]
-                    
-            # 先将图像resize到512*512
-            if isinstance(image, PILImage.Image):
-                # 如果是PIL图像，先resize
-                image = image.resize((512, 512), PILImage.Resampling.LANCZOS)
-                image = transforms.ToTensor()(image).unsqueeze(0) * 2 - 1
+                image, prompt = example["image"], example["prompt"]
                 image = image.to(self.device)
-            else:
-                # 如果是tensor，先resize
-                if image.dim() == 3:
-                    image = image.unsqueeze(0)  # 添加batch维度
-                # 使用F.interpolate进行resize
-                image = F.interpolate(image, size=(512, 512), mode='bilinear', align_corners=False)
-                image = image.to(self.device)
-            
-            generated_image = self.generate_image(prompt, image)
-            if generated_image is None:
-                logger.warning(f"样本 {i}: 图像生成失败")
-                continue
-            
-            metrics, mask = self.calculate_metrics(image, generated_image)
-            if metrics is None:
-                logger.warning(f"样本 {i}: 指标计算失败")
-                continue
+                assert image.shape[-1] == 512 and image.shape[-2] == 512, f"image size must be 512x512, got {image.shape}"
 
-            passed = all([metrics['psnr'] >= self.thresholds['psnr'],
-                        # metrics['ssim'] >= self.thresholds['ssim'],
-                        # metrics['l1'] <= self.thresholds['l1'],
-                        # metrics['l2'] <= self.thresholds['l2'],
-                        # # metrics['edit_ratio'] <= self.thresholds['edit_ratio_max'],
-                        # # metrics['edit_ratio'] >= self.thresholds['edit_ratio_min']
-                        # metrics['edit_ratio'] <= self.thresholds['edit_ratio']
-                    ])
+                generated_image = self.generate_image(prompt, image)
+                if generated_image is None:
+                    logger.warning(f"样本 {i}: 图像生成失败")
+                    continue
                 
-            if passed:
-                # 只保存样本ID和指标，不保存图片
-                pass_count += 1
-                all_metrics.append(metrics)
+                metrics, mask = self.calculate_metrics(image, generated_image)
+                if metrics is None:
+                    logger.warning(f"样本 {i}: 指标计算失败")
+                    continue
 
-                # 保存样本ID和指标信息
-                saved_data["filtered_sample_ids"].append({
-                    "sample_id": i,  # 原始数据集中的索引
-                    "metrics": metrics
-                })
+                passed = all([metrics['psnr'] >= self.thresholds['psnr'],
+                            # metrics['ssim'] >= self.thresholds['ssim'],
+                            # metrics['l1'] <= self.thresholds['l1'],
+                            # metrics['l2'] <= self.thresholds['l2'],
+                            # # metrics['edit_ratio'] <= self.thresholds['edit_ratio_max'],
+                            # # metrics['edit_ratio'] >= self.thresholds['edit_ratio_min']
+                            # metrics['edit_ratio'] <= self.thresholds['edit_ratio']
+                        ])
+                    
+                if passed:
+                    # 只保存样本ID和指标，不保存图片
+                    pass_count += 1
+                    all_metrics.append(metrics)
 
-                # 记录详细日志
-                log_dict = {
-                    "sample_idx": i,
-                    "psnr": metrics['psnr'],
-                    "ssim": metrics['ssim'],
-                    "l1": metrics['l1'],
-                    "l2": metrics['l2'],
-                    "edit_ratio": metrics['edit_ratio'],
-                    "pass_rate": pass_count / (i + 1)
-                }
-                logger.info(log_dict)
-            
-            # 每处理10000个样本保存一次metadata（无论是否通过筛选）
-            if (i + 1) % 10000 == 0:
-                save_metadata_checkpoint(pass_count, all_metrics, i + 1)
+                    # 保存样本ID和指标信息
+                    saved_data["filtered_sample_ids"].append({
+                        "sample_id": i,  # 原始数据集中的索引
+                        "metrics": metrics
+                    })
+
+                    # 记录详细日志
+                    log_dict = {
+                        "sample_idx": i,
+                        "psnr": metrics['psnr'],
+                        "ssim": metrics['ssim'],
+                        "l1": metrics['l1'],
+                        "l2": metrics['l2'],
+                        "edit_ratio": metrics['edit_ratio'],
+                        "pass_rate": pass_count / (i + 1)
+                    }
+                    logger.info(log_dict)
+                
+                # 每处理10000个样本保存一次metadata（无论是否通过筛选）
+                if (i + 1) % 10000 == 0:
+                    save_metadata_checkpoint(pass_count, all_metrics, i + 1)
 
         # 最终统计
         final_stats = {}
@@ -478,7 +472,9 @@ def load_dataset_simple(dataset_dir):
     print(f"数据集大小: {len(combined_dataset)}")
     if len(combined_dataset) > 0:
         print(f"数据集键: {list(combined_dataset[0].keys())}")
-    
+        
+    combined_dataset = combined_dataset.with_transform(partial(preprocess_train, image_size=512))
+
     return combined_dataset
 
 def load_filtered_dataset(data_dir):

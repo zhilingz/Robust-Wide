@@ -63,7 +63,7 @@ def collate_fn(examples):
     prompt = [example["prompt"] for example in examples]
     return {"image": image, "prompt": prompt}
 
-def get_hugging_dataset(instance_data_root, image_size, accelerator, train_size=20000, test_size=1200):
+def get_hugging_dataset(logger, instance_data_root, image_size, accelerator, train_size=20000, test_size=1200):
     # 加载数据集
     dataset = load_dataset(instance_data_root)
     
@@ -78,11 +78,11 @@ def get_hugging_dataset(instance_data_root, image_size, accelerator, train_size=
     if len(combined_dataset) >= train_size:
         train_dataset = combined_dataset.select(range(train_size))
     else:
-        print(f"数据集样本数量({len(combined_dataset)})小于请求的训练集大小({train_size})，使用所有样本")
+        logger.info(f"数据集样本数量({len(combined_dataset)})小于请求的训练集大小({train_size})，使用所有样本")
         train_dataset = combined_dataset
     
     # 测试集：永远从 instructpix2pix 数据集中加载
-    print("从 instructpix2pix 数据集中加载测试集")
+    logger.info("从 instructpix2pix 数据集中加载测试集")
     instructpix2pix_dataset = load_dataset("/public/zhangzhiling/datasets/timbrooks___instructpix2pix-clip-filtered/default/0.0.0/aa665b890915f7a42f8615bee868a9f3447e178f")  # 加载 instructpix2pix 数据集
     test_dataset = instructpix2pix_dataset["train"].select(range(test_size))  # 选择测试集样本
     
@@ -94,8 +94,8 @@ def get_hugging_dataset(instance_data_root, image_size, accelerator, train_size=
             test_dataset = test_dataset.with_transform(partial(preprocess_train, image_size=image_size))
             
             # 输出训练集和测试集的大小
-            print(f"训练集大小: {len(train_dataset)}")
-            print(f"测试集大小: {len(test_dataset)}")
+            logger.info(f"训练集大小: {len(train_dataset)}")
+            logger.info(f"测试集大小: {len(test_dataset)}")
     else:
         # 没有accelerator时直接执行
         # 应用预处理
@@ -103,12 +103,12 @@ def get_hugging_dataset(instance_data_root, image_size, accelerator, train_size=
         test_dataset = test_dataset.with_transform(partial(preprocess_train, image_size=image_size))
         
         # 输出训练集和测试集的大小
-        print(f"训练集大小: {len(train_dataset)}")
-        print(f"测试集大小: {len(test_dataset)}")
+        logger.info(f"训练集大小: {len(train_dataset)}")
+        logger.info(f"测试集大小: {len(test_dataset)}")
     
     return train_dataset, test_dataset
 
-def get_filtered_dataset(args, image_size, accelerator, train_size=20000, test_size=1200):
+def get_filtered_dataset(args, logger, image_size, accelerator, train_size=20000, test_size=1200):
     """
     从筛选后的数据集中加载数据
     基于保存的样本ID从原始数据集中加载对应样本
@@ -117,7 +117,7 @@ def get_filtered_dataset(args, image_size, accelerator, train_size=20000, test_s
     filtered_dataset_path = args.train_data_dir
     if not os.path.exists(filtered_dataset_path):
         raise FileNotFoundError(f"筛选数据集不存在: {filtered_dataset_path}")
-    print(f"从筛选数据集加载: {filtered_dataset_path}")
+    logger.info(f"从筛选数据集加载: {filtered_dataset_path}")
     
     # 加载元数据
     metadata_path = os.path.join(filtered_dataset_path, "metadata.json")
@@ -132,7 +132,7 @@ def get_filtered_dataset(args, image_size, accelerator, train_size=20000, test_s
     original_dataset_path = metadata.get("original_dataset_path")
     
     # 加载原始数据集
-    print(f"从原始数据集加载: {original_dataset_path}")
+    logger.info(f"从原始数据集加载: {original_dataset_path}")
     original_dataset = load_dataset(original_dataset_path)
     
     # 合并所有分支的数据到一个统一的Dataset对象
@@ -147,7 +147,7 @@ def get_filtered_dataset(args, image_size, accelerator, train_size=20000, test_s
     
     # 处理样本数量
     if len(filtered_indices) < train_size:
-        print(f"筛选数据集样本数量({len(filtered_indices)})小于请求的训练集大小({train_size})，使用所有样本")
+        logger.info(f"筛选数据集样本数量({len(filtered_indices)})小于请求的训练集大小({train_size})，使用所有样本")
         train_indices = filtered_indices
     else:
         train_indices = filtered_indices[:train_size]
@@ -156,7 +156,7 @@ def get_filtered_dataset(args, image_size, accelerator, train_size=20000, test_s
     train_dataset = combined_original_dataset.select(train_indices)
     
     # 测试集：仍然从原始 instructpix2pix 数据集中加载
-    print("从 instructpix2pix 数据集中加载测试集")
+    logger.info("从 instructpix2pix 数据集中加载测试集")
     instructpix2pix_dataset = load_dataset("/public/zhangzhiling/datasets/timbrooks___instructpix2pix-clip-filtered/default/0.0.0/aa665b890915f7a42f8615bee868a9f3447e178f")
     test_dataset = instructpix2pix_dataset["train"].select(range(test_size))
     
@@ -167,7 +167,7 @@ def get_filtered_dataset(args, image_size, accelerator, train_size=20000, test_s
         test_dataset = test_dataset.with_transform(partial(preprocess_train, image_size=image_size))
         
         # 输出训练集和测试集的大小
-        print(f"筛选训练集大小: {len(train_dataset)}")
-        print(f"测试集大小: {len(test_dataset)}")
+        logger.info(f"筛选训练集大小: {len(train_dataset)}")
+        logger.info(f"测试集大小: {len(test_dataset)}")
     
     return train_dataset, test_dataset

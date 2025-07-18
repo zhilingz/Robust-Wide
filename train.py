@@ -370,63 +370,55 @@ def calculate_edit_analysis(before, after, thresh=15, kernel=3):
     """
     计算编辑区域的mask和占比
     """
-    try:
-        # 转换为numpy进行opencv操作
-        before_np = ((before.detach().cpu() + 1) * 127.5).clamp(0, 255).byte().numpy()[0].transpose(1, 2, 0)
-        after_np = ((after.detach().cpu() + 1) * 127.5).clamp(0, 255).byte().numpy()[0].transpose(1, 2, 0)
-        
-        # 计算颜色差异
-        diff = np.abs(after_np.astype(np.int16) - before_np.astype(np.int16))
-        color_diff = np.max(diff, axis=2).astype(np.uint8)
-        
-        # 二值化和形态学处理
-        _, mask = cv2.threshold(color_diff, thresh, 255, cv2.THRESH_BINARY)
-        kernel_elem = cv2.getStructuringElement(cv2.MORPH_RECT, (kernel, kernel))
-        mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel_elem, iterations=1)
-        
-        ratio = mask.sum() / 255 / mask.size
-        return mask, ratio
-    except Exception as e:
-        print(f"编辑区域计算出错: {e}")
-        return None, 0.1
+    # 转换为numpy进行opencv操作
+    before_np = ((before.detach().cpu() + 1) * 127.5).clamp(0, 255).byte().numpy()[0].transpose(1, 2, 0)
+    after_np = ((after.detach().cpu() + 1) * 127.5).clamp(0, 255).byte().numpy()[0].transpose(1, 2, 0)
+    
+    # 计算颜色差异
+    diff = np.abs(after_np.astype(np.int16) - before_np.astype(np.int16))
+    color_diff = np.max(diff, axis=2).astype(np.uint8)
+    
+    # 二值化和形态学处理
+    _, mask = cv2.threshold(color_diff, thresh, 255, cv2.THRESH_BINARY)
+    kernel_elem = cv2.getStructuringElement(cv2.MORPH_RECT, (kernel, kernel))
+    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel_elem, iterations=1)
+    
+    ratio = mask.sum() / 255 / mask.size
+    return mask, ratio
 
 def calculate_metrics(before, after):
     """计算图像对比指标"""
-    try:
-        # 统一转换为tensor
-        def to_tensor(image):
-            if isinstance(image, Image.Image):
-                tensor = transforms.ToTensor()(image) * 2 - 1
-            else:
-                tensor = image
-            return tensor.unsqueeze(0) if tensor.dim() == 3 else tensor
-        
-        before = to_tensor(before)
-        after = to_tensor(after)
-        
-        # 转换到[0,1]用于PSNR和SSIM
-        before_01 = (before + 1) / 2
-        after_01 = (after + 1) / 2
-        
-        # 计算编辑比例和mask
-        mask, edit_ratio = calculate_edit_analysis(before, after)
-        
-        # 计算SSIM
-        ssim_val = ssim(after_01, before_01, window_size=5)
-        ssim_score = torch.mean(ssim_val).item() if ssim_val.dim() > 0 else ssim_val.item()
-        
-        metrics = {
-            'psnr': psnr(after_01, before_01, max_val=1.0).item(),
-            'ssim': ssim_score,
-            'l1': F.l1_loss(after, before).item(),
-            'l2': F.mse_loss(after, before).item(),
-            'edit_ratio': edit_ratio
-        }
-        
-        return metrics, mask
-    except Exception as e:
-        print(f"指标计算出错: {e}")
-        return None, None
+    # 统一转换为tensor
+    def to_tensor(image):
+        if isinstance(image, Image.Image):
+            tensor = transforms.ToTensor()(image) * 2 - 1
+        else:
+            tensor = image
+        return tensor.unsqueeze(0) if tensor.dim() == 3 else tensor
+    
+    before = to_tensor(before)
+    after = to_tensor(after)
+    
+    # 转换到[0,1]用于PSNR和SSIM
+    before_01 = (before + 1) / 2
+    after_01 = (after + 1) / 2
+    
+    # 计算编辑比例和mask
+    mask, edit_ratio = calculate_edit_analysis(before, after)
+    
+    # 计算SSIM
+    ssim_val = ssim(after_01, before_01, window_size=5)
+    ssim_score = torch.mean(ssim_val).item() if ssim_val.dim() > 0 else ssim_val.item()
+    
+    metrics = {
+        'psnr': psnr(after_01, before_01, max_val=1.0).item(),
+        'ssim': ssim_score,
+        'l1': F.l1_loss(after, before).item(),
+        'l2': F.mse_loss(after, before).item(),
+        'edit_ratio': edit_ratio
+    }
+    
+    return metrics, mask
 
 def tensor_to_bgr(tensor):
     """将tensor转换为BGR格式的numpy数组"""
@@ -862,7 +854,7 @@ def main(args):
     if args.seed is not None:
         set_seed(args.seed)
 
-    print("Using GPU:", os.environ['CUDA_VISIBLE_DEVICES'])
+    logger.info("Using GPU:", os.environ['CUDA_VISIBLE_DEVICES'])
 
     # 配置日志记录并获取输出目录
     output_with_time_dir = setup_logging(args, logger)
@@ -888,12 +880,13 @@ def main(args):
     params_to_optimize = list(p for p in wm_model.parameters() if p.requires_grad)
 
     pipe = initialize_pipeline(args, weight_dtype, device)
-    print("pipe",pipe)
+    logger.info("pipe",pipe)
     
     if args.enable_offline_filter:
         # 离线筛选数据集
         train_dataset, test_dataset = get_filtered_dataset(
             args, 
+            logger,
             args.image_size, 
             accelerator, 
             args.train_size, 
@@ -903,6 +896,7 @@ def main(args):
     else:
         # 正常加载数据集
         train_dataset, test_dataset = get_hugging_dataset(
+            logger,
             args.train_data_dir, 
             args.image_size, 
             accelerator, 
