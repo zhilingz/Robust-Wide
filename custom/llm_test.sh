@@ -20,3 +20,5 @@ echo "Current time: $(TZ='Asia/Shanghai' date)"
 conda activate Robust-Wide
 python custom/llm_test.py
 echo "job end"
+
+# sbatch custom/llm_test.sh

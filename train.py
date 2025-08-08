@@ -184,46 +184,42 @@ def diff_image(before, after, method='edit_ratio', thresh=15, kernel=3):
 
 def initialize_pipeline(args, weight_dtype, device):
     # 训练：不同模型不同加载方式
-    if "instruct-pix2pix" in args.model_dir or "magicbrush" in args.model_dir:
+    if args.model_dir.split("/")[-1] == "magicbrush-jul7":
         pipe = CustomStableDiffusionInstructPix2PixPipeline.from_pretrained(
             args.model_dir, torch_dtype=weight_dtype, local_files_only=True
         ).to(device)
-    elif "sd-turbo" in args.model_dir:
-        from custom.custom_i2i import CustomStableDiffusionImg2ImgPipeline
-        pipe = CustomStableDiffusionImg2ImgPipeline.from_pretrained(
-            args.model_dir, torch_dtype=weight_dtype, local_files_only=True
-        ).to(device)
-    elif "sd-x2-latent-upscaler" in args.model_dir:
-        from custom.custom_sd import CustomStableDiffusionPipeline, CustomStableDiffusionLatentUpscalePipeline
-        pipe = CustomStableDiffusionPipeline.from_pretrained(
-            "CompVis/stable-diffusion-v1-4", torch_dtype=weight_dtype, local_files_only=True
-        ).to(device)
-        upscaler = CustomStableDiffusionLatentUpscalePipeline.from_pretrained(
-            args.model_dir, torch_dtype=weight_dtype, local_files_only=True
-        ).to(device)
-        pipe = [pipe, upscaler]
-    elif "FLUX" in args.model_dir:
-        from custom.custom_flux import CustomFluxFillPipeline
-        pipe = CustomFluxFillPipeline.from_pretrained(
-            args.model_dir, torch_dtype=weight_dtype, local_files_only=True
-        )
-        pipe.load_lora_weights(
-            "RiverZ/normal-lora", local_files_only=True, 
-            weight_name="pytorch_lora_weights.safetensors",
-            lora_scale=1.0)
-        pipe = pipe.to(device)
-    else:
-        raise ValueError("model not supported")
-
-    # 不同模型不同scheduler
-    if "magicbrush" in args.model_dir:
-        from diffusers import EulerAncestralDiscreteScheduler
-        pipe.scheduler = EulerAncestralDiscreteScheduler.from_config(pipe.scheduler.config)
-    elif "instruct-pix2pix-distill" in args.model_dir:
+        # load and fuse lcm lora
         from diffusers import LCMScheduler
         pipe.scheduler = LCMScheduler.from_config(pipe.scheduler.config)
-        # Adapt the InstructPix2Pix model using the LoRA parameters
-        pipe.load_lora_weights("latent-consistency/lcm-lora-sdv1-5")
+        pipe.load_lora_weights(
+            "latent-consistency/lcm-lora-sdv1-5", local_files_only=True,
+            weight_name="pytorch_lora_weights.safetensors")
+    # elif "sd-turbo" in args.model_dir:
+    #     from custom.custom_i2i import CustomStableDiffusionImg2ImgPipeline
+    #     pipe = CustomStableDiffusionImg2ImgPipeline.from_pretrained(
+    #         args.model_dir, torch_dtype=weight_dtype, local_files_only=True
+    #     ).to(device)
+    # elif "sd-x2-latent-upscaler" in args.model_dir:
+    #     from custom.custom_sd import CustomStableDiffusionPipeline, CustomStableDiffusionLatentUpscalePipeline
+    #     pipe = CustomStableDiffusionPipeline.from_pretrained(
+    #         "CompVis/stable-diffusion-v1-4", torch_dtype=weight_dtype, local_files_only=True
+    #     ).to(device)
+    #     upscaler = CustomStableDiffusionLatentUpscalePipeline.from_pretrained(
+    #         args.model_dir, torch_dtype=weight_dtype, local_files_only=True
+    #     ).to(device)
+    #     pipe = [pipe, upscaler]
+    # elif "FLUX" in args.model_dir:
+    #     from custom.custom_flux import CustomFluxFillPipeline
+    #     pipe = CustomFluxFillPipeline.from_pretrained(
+    #         args.model_dir, torch_dtype=weight_dtype, local_files_only=True
+    #     )
+    #     pipe.load_lora_weights(
+    #         "RiverZ/normal-lora", local_files_only=True, 
+    #         weight_name="pytorch_lora_weights.safetensors",
+    #         lora_scale=1.0)
+    #     pipe = pipe.to(device)
+    else:
+        raise ValueError("model not supported")
 
     # 冻结参数
     if "sd-x2-latent-upscaler" in args.model_dir:
@@ -265,105 +261,107 @@ def generate_image(args, pipe, prompt, wm_image, accelerator, is_test=False, dev
             output_type="pt",
         )
     else:
-        # 根据模型选择不同的pipe参数
-        if "instruct-pix2pix-distill" in args.model_dir:
+        if args.model_dir.split("/")[-1] == "magicbrush-jul7":
             generated_image = pipe(
                 prompt, 
                 image=wm_image, 
-                num_images_per_prompt=1, 
-                num_inference_steps=4,  # 4改为2，测试效果
-                guidance_scale=2.0,     # 使用较小的guidance_scale
-                image_guidance_scale=1.0,  # 使用较小的image_guidance_scale
-                generator=generator,
-                last_grad_steps=args.last_grad_steps,
-                output_type="pt"
-            )
-        elif "sd-turbo" in args.model_dir:
-            generated_image = pipe(
-                prompt, 
-                image=wm_image, 
-                num_images_per_prompt=1, 
-                num_inference_steps=2,
-                guidance_scale=0.0, 
-                strength=0.5,
-                generator=generator,
-                last_grad_steps=args.last_grad_steps,
-                output_type="pt"
-            ).images     # pipe返回值为StableDiffusionPipelineOutput 类型，需要取images，形状 (1, C, H, W)
-            generated_image = 2 * generated_image - 1 # 将值域从[-1,1]转为[0,1]，防止图片泛白
-        elif "sd-x2-latent-upscaler" in args.model_dir:
-            # 将水印图像编码到潜在空间
-            # 移除: wm_image = wm_image.to(dtype=torch.float16) 
-            # 因为它可能创建了一个新的 float16 张量，而原始的 float32 张量可能在计算图中仍然被引用。
-            # 通常建议让 Accelerator 自动处理混合精度类型。
-            # 需要存储两个模型的梯度，batchsize设为1
-            with accelerator.autocast():
-                latent_dist = pipe[0].vae.encode(wm_image).latent_dist 
-                low_res_latents = latent_dist.mean 
-                low_res_latents = low_res_latents * pipe[0].vae.config.scaling_factor 
-            generated_image = pipe[1](
-                prompt=prompt,
-                image=low_res_latents,
-                num_inference_steps=20,
-                guidance_scale=0,
-                generator=generator,
-                last_grad_steps=args.last_grad_steps,
-                output_type="pt"
-            )
-            # 方法二：将生成的图像调整到512x512大小
-            generated_image = F.interpolate(generated_image, size=(512, 512), mode='bilinear', align_corners=False)
-            generated_image = 2 * generated_image - 1  
-        elif "magicbrush" in args.model_dir:
-            generated_image = pipe(
-                prompt, 
-                image=wm_image, 
-                num_inference_steps=20, 
-                image_guidance_scale=2.0, 
-                guidance_scale=4, 
+                num_inference_steps=3, #20
+                guidance_scale=args.guidance_scale, 
+                image_guidance_scale=args.image_guidance_scale, 
                 generator=generator,
                 last_grad_steps=args.last_grad_steps,
                 output_type="pt",
                 )
-        elif "FLUX" in args.model_dir:
-            # 将 tensor 转成 PIL 图像
-            pil_img = to_pil_image(denormalize(wm_image[0].cpu()))
-            width, height = pil_img.size
-            # 构造拼接图像和 mask
-            combined = Image.new("RGB", (width*2, height))
-            combined.paste(pil_img, (0, 0))
-            combined.paste(pil_img, (width, 0))
-            mask_array = np.zeros((height, width*2), dtype=np.uint8)
-            mask_array[:, width:] = 255
-            mask = Image.fromarray(mask_array)
-            # prompt
-            prompt = f'A diptych with two side-by-side images of the same scene. On the right, the scene is exactly the same as on the left but {prompt}'
-            # 运行 FluxFillPipeline
-            result = pipe(
-                prompt=prompt,
-                image=combined,
-                mask_image=mask,
-                height=height,
-                width=width*2,
-                guidance_scale=50,
-                num_inference_steps=28,
-                generator=generator,
-                output_type="pt"
-            ).images[0]
-            # 裁剪右半部分并转回 tensor
-            cropped = result.crop((width, 0, width*2, height))
-            generated_image = transforms.ToTensor()(cropped).unsqueeze(0).to(device)
-        else:
-            generated_image = pipe(
-                prompt, 
-                image=wm_image, 
-                num_images_per_prompt=1, 
-                num_inference_steps=20,
-                guidance_scale=10, 
-                image_guidance_scale=1.5, # 1.5原图保留太少（62.98%的编辑区域），2.0还可以（38.45%的编辑区域）
-                generator=generator,
-                last_grad_steps=args.last_grad_steps,
-                output_type="pt",
-            )
+        # elif args.model_dir.split("/")[-1] == "instruct-pix2pix":
+        #     generated_image = pipe(
+        #         prompt, 
+        #         image=wm_image, 
+        #         num_images_per_prompt=1, 
+        #         num_inference_steps=10,
+        #         guidance_scale=10, 
+        #         image_guidance_scale=1.5, # 1.5原图保留太少（62.98%的编辑区域），2.0还可以（38.45%的编辑区域）
+        #         generator=generator,
+        #         last_grad_steps=args.last_grad_steps,
+        #         output_type="pt",
+        #     )
+        # 根据模型选择不同的pipe参数
+        # if "instruct-pix2pix-distill" in args.model_dir:
+        #     generated_image = pipe(
+        #         prompt, 
+        #         image=wm_image, 
+        #         num_images_per_prompt=1, 
+        #         num_inference_steps=4,  # 4改为2，测试效果
+        #         guidance_scale=2.0,     # 使用较小的guidance_scale
+        #         image_guidance_scale=1.0,  # 使用较小的image_guidance_scale
+        #         generator=generator,
+        #         last_grad_steps=args.last_grad_steps,
+        #         output_type="pt"
+        #     )
+        # elif "sd-turbo" in args.model_dir:
+        #     generated_image = pipe(
+        #         prompt, 
+        #         image=wm_image, 
+        #         num_images_per_prompt=1, 
+        #         num_inference_steps=2,
+        #         guidance_scale=0.0, 
+        #         strength=0.5,
+        #         generator=generator,
+        #         last_grad_steps=args.last_grad_steps,
+        #         output_type="pt"
+        #     ).images     # pipe返回值为StableDiffusionPipelineOutput 类型，需要取images，形状 (1, C, H, W)
+        #     generated_image = 2 * generated_image - 1 # 将值域从[-1,1]转为[0,1]，防止图片泛白
+        # elif "sd-x2-latent-upscaler" in args.model_dir:
+        #     # 将水印图像编码到潜在空间
+        #     # 移除: wm_image = wm_image.to(dtype=torch.float16) 
+        #     # 因为它可能创建了一个新的 float16 张量，而原始的 float32 张量可能在计算图中仍然被引用。
+        #     # 通常建议让 Accelerator 自动处理混合精度类型。
+        #     # 需要存储两个模型的梯度，batchsize设为1
+        #     with accelerator.autocast():
+        #         latent_dist = pipe[0].vae.encode(wm_image).latent_dist 
+        #         low_res_latents = latent_dist.mean 
+        #         low_res_latents = low_res_latents * pipe[0].vae.config.scaling_factor 
+        #     generated_image = pipe[1](
+        #         prompt=prompt,
+        #         image=low_res_latents,
+        #         num_inference_steps=20,
+        #         guidance_scale=0,
+        #         generator=generator,
+        #         last_grad_steps=args.last_grad_steps,
+        #         output_type="pt"
+        #     )
+        #     # 方法二：将生成的图像调整到512x512大小
+        #     generated_image = F.interpolate(generated_image, size=(512, 512), mode='bilinear', align_corners=False)
+        #     generated_image = 2 * generated_image - 1  
+        #
+        # elif "FLUX" in args.model_dir:
+        #     # 将 tensor 转成 PIL 图像
+        #     pil_img = to_pil_image(denormalize(wm_image[0].cpu()))
+        #     width, height = pil_img.size
+        #     # 构造拼接图像和 mask
+        #     combined = Image.new("RGB", (width*2, height))
+        #     combined.paste(pil_img, (0, 0))
+        #     combined.paste(pil_img, (width, 0))
+        #     mask_array = np.zeros((height, width*2), dtype=np.uint8)
+        #     mask_array[:, width:] = 255
+        #     mask = Image.fromarray(mask_array)
+        #     # prompt
+        #     prompt = f'A diptych with two side-by-side images of the same scene. On the right, the scene is exactly the same as on the left but {prompt}'
+        #     # 运行 FluxFillPipeline
+        #     result = pipe(
+        #         prompt=prompt,
+        #         image=combined,
+        #         mask_image=mask,
+        #         height=height,
+        #         width=width*2,
+        #         guidance_scale=50,
+        #         num_inference_steps=28,
+        #         generator=generator,
+        #         output_type="pt"
+        #     ).images[0]
+        #     # 裁剪右半部分并转回 tensor
+        #     cropped = result.crop((width, 0, width*2, height))
+        #     generated_image = transforms.ToTensor()(cropped).unsqueeze(0).to(device)
+
     return generated_image
 
 def calculate_edit_analysis(before, after, thresh=15, kernel=3):
@@ -457,7 +455,7 @@ def create_comparison_image(pipe, accelerator, original_img, wm_img, prompt, out
     """
     os.makedirs(output_dir, exist_ok=True)
     
-    # 生成编辑图像
+    # 生成编辑图像 todo 是否是eval（）模式导致编辑不一样，从而导致训练时计算的psnr和这个函数计算的psnr不一样
     with torch.no_grad():   
         pipe.text_encoder.eval()
         pipe.unet.eval()
@@ -588,7 +586,7 @@ def setup_logging(args, logger):
 
     return output_with_time_dir
 
-def test_model(args, wm_model, test_dataloader, device, accelerator):
+def test_model(args, wm_model, test_dataloader, device, accelerator, global_step=None):
     """
     测试水印模型在多种场景下的性能：
     1. 无失真场景
@@ -598,15 +596,19 @@ def test_model(args, wm_model, test_dataloader, device, accelerator):
     输出每种场景的比特错误率(BER)以及原图和水印图的SSIM和PSNR
     """
     # 重新加载 test_pipe
-    from custom.custom_insp2p import CustomStableDiffusionInstructPix2PixPipeline
-    test_pipe = CustomStableDiffusionInstructPix2PixPipeline.from_pretrained(
+    from diffusers import StableDiffusionInstructPix2PixPipeline, EulerAncestralDiscreteScheduler
+    test_pipe = StableDiffusionInstructPix2PixPipeline.from_pretrained(
         "/public/zhangzhiling/models/timbrooks/instruct-pix2pix",
         torch_dtype=wm_model.weight_dtype,
-        local_files_only=True
+        local_files_only=True,
+        safety_checker=None
     ).to(device)
+    
+    # 单独设置调度器
+    test_pipe.scheduler = EulerAncestralDiscreteScheduler.from_config(test_pipe.scheduler.config)
     test_pipe.text_encoder.eval()
     test_pipe.unet.eval()
-    test_pipe.vae.eval()
+    test_pipe.vae.eval() 
     
     # 定义通用失真变换
     def apply_distortions(images, distortion_type):
@@ -748,7 +750,18 @@ def test_model(args, wm_model, test_dataloader, device, accelerator):
             results["no_distortion"] += error_rate_no_distortion
             
             # ============ 场景2: 图像编辑失真 ============ #
-            generated_image = generate_image(args, test_pipe, prompt, wm_image, accelerator, is_test=True, device=device)
+            # 使用官方pipeline进行图像编辑
+            generator = torch.Generator(device="cpu").manual_seed(42)
+            generated_image = test_pipe(
+                prompt,
+                image=wm_image,
+                num_images_per_prompt=1,
+                num_inference_steps=args.test_num_inference_steps,
+                guidance_scale=args.test_guidance_scale,
+                image_guidance_scale=args.test_image_guidance_scale,
+                generator=generator,
+                output_type="pt",
+            ).images
             decoded_message_after_edit = wm_model.decoder(generated_image.to(dtype=torch.float32))
             
             error_rate_after_edit = decoded_message_error_rate_batch(
@@ -788,6 +801,10 @@ def test_model(args, wm_model, test_dataloader, device, accelerator):
     # 添加SSIM和PSNR的平均值
     log_dict["psnr"] = float(np.mean(psnr_values))
     log_dict["ssim"] = float(np.mean(ssim_values))
+    
+    # 添加global_step信息
+    if global_step is not None:
+        log_dict["global_step"] = global_step
     
     logger.info(log_dict)
     
@@ -854,8 +871,11 @@ def main(args):
     if args.seed is not None:
         set_seed(args.seed)
 
-    logger.info("Using GPU:", os.environ['CUDA_VISIBLE_DEVICES'])
-
+    logger.info("Using GPU: %s", os.environ['CUDA_VISIBLE_DEVICES'])
+    
+    if args.train_data_dir.split("/")[0] == "filtered_datasets":
+        args.enable_offline_filter = True
+        
     # 配置日志记录并获取输出目录
     output_with_time_dir = setup_logging(args, logger)
     
@@ -880,7 +900,7 @@ def main(args):
     params_to_optimize = list(p for p in wm_model.parameters() if p.requires_grad)
 
     pipe = initialize_pipeline(args, weight_dtype, device)
-    logger.info("pipe",pipe)
+    logger.info("pipe: %s",pipe)
     
     if args.enable_offline_filter:
         # 离线筛选数据集
@@ -920,7 +940,7 @@ def main(args):
     )
     test_dataloader = DataLoader(
         test_dataset,
-        batch_size=args.batch_size,
+        batch_size=args.batch_size, #todo 增大
         drop_last=False,
         shuffle=False,
         collate_fn=collate_fn,
@@ -1085,14 +1105,14 @@ def main(args):
                         logger.info(log_dict)
 
                     if global_step % args.save_steps == 0:
-                        test_model(args, wm_model, test_dataloader, device, accelerator)
+                        test_model(args, wm_model, test_dataloader, device, accelerator, global_step)
                         
                         # 保存模型
                         save_step_dir = os.path.join(output_with_time_dir, f"step{global_step}")
                         os.makedirs(save_step_dir, exist_ok=True)
                         save_all(wm_model, save_step_dir, accelerator, args, wm_model_config, pipe, image, wm_image, prompt, output_with_time_dir)
                     
-                    if args.enable_output_images and global_step < 4000 and global_step % 10 == 0:
+                    if args.enable_output_images and global_step < 4000 and global_step % args.save_steps == 0:
                         _, metrics_A, metrics_B = create_comparison_image(pipe, accelerator, image, wm_image, prompt, output_with_time_dir+'/output_images', global_step)
                         metrics_A_list.append(metrics_A)
                         metrics_B_list.append(metrics_B)
@@ -1189,10 +1209,16 @@ if __name__ == "__main__":
     parser.add_argument("--wm_model_config", type=str, default=None)
     parser.add_argument("--last_grad_steps", type=int, default=3)
     parser.add_argument("--enc_latent_weight", type=float, default=None)
+    parser.add_argument("--guidance_scale", type=float, default=1)
+    parser.add_argument("--image_guidance_scale", type=float, default=1)
     parser.add_argument("--filter_threshold", type=float, default=0.3, help="Threshold for filtering out samples")
     parser.add_argument("--enable_online_filter", action="store_true", default=False, help="Enable real-time filtering")
     parser.add_argument("--filter_method", type=str, default="edit_ratio", help="Method for filtering out samples")
     parser.add_argument("--enable_offline_filter", action="store_true", default=False, help="Enable offline filtering")
     parser.add_argument("--enable_output_images", action="store_true", default=False, help="Enable output images")
+    # test_pipe参数
+    parser.add_argument("--test_num_inference_steps", type=int, default=20, help="Number of inference steps for test_pipe")
+    parser.add_argument("--test_guidance_scale", type=float, default=10.0, help="Guidance scale for test_pipe")
+    parser.add_argument("--test_image_guidance_scale", type=float, default=1.5, help="Image guidance scale for test_pipe")
     args = parser.parse_args()
     main(args)

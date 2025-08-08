@@ -8,3 +8,5 @@ filtered_datasets/
 __init__.py
 .vscode/
 metrics_output/
+WAVES/
+examples/step20000/

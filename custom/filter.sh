@@ -22,14 +22,14 @@ conda activate Robust-Wide
 nvidia-smi --query-gpu=gpu_name --format=csv,noheader
 
 # 数据集和模型配置
-DATA_ID=3  # 通过修改这个数字来选择数据集
-MODEL_ID=1  # 通过修改这个数字来选择模型
+DATA_ID=0  # 通过修改这个数字来选择数据集
+MODEL_ID=0  # 通过修改这个数字来选择模型
 declare -a DATASETS=(
     "/public/zhangzhiling/datasets/timbrooks___instructpix2pix-clip-filtered/default/0.0.0/aa665b890915f7a42f8615bee868a9f3447e178f"
     "/public/zhangzhiling/datasets/BleachNick___ultra_edit_500k/default/0.0.0/8d78dc552b576027618ff2170c4c1d7bcaf27ad2"
     "/public/zhangzhiling/datasets/osunlp___magic_brush/default/0.0.0/1d8d4629150d18ca50afab66391866f2085be989"
     "/public/zhangzhiling/datasets/facebook___emu_edit_test_set/default/0.0.0/b31936a0b6c267e87d373014034cd8fb44ced2fb"
-    )
+)
 declare -a MODELS=(
     "/public/zhangzhiling/models/timbrooks/instruct-pix2pix"
     "/public/zhangzhiling/models/vinesmsuic/magicbrush-jul7"
@@ -41,13 +41,46 @@ declare -a MODELS=(
 
 DATA_DIR=${DATASETS[$DATA_ID]}
 MODEL_DIR=${MODELS[$MODEL_ID]}
-OUTPUT_DIR="./filtered_datasets/max20000_id_psnr12.5/"
+OUTPUT_DIR="./filtered_datasets/"
 
-python -m custom.filter --filter_num 20000 \
+python -m custom.filter --filter_num 1000 \
     --data_dir $DATA_DIR \
-    --model_dir $MODEL_DIR\
-    --output_dir $OUTPUT_DIR
+    --model_dir $MODEL_DIR \
+    --output_dir $OUTPUT_DIR \
+    --reverse_filter True \
+    --enable_psnr True \
+    --psnr_min 17.0 \
+    --psnr_max max \
+    --enable_ssim False \
+    --ssim_min 0.80 \
+    --ssim_max max \
+    --enable_l1 False \
+    --l1_min min \
+    --l1_max 0.15 \
+    --enable_l2 False \
+    --l2_min min \
+    --l2_max 0.03 \
+    --enable_edit_ratio False \
+    --edit_ratio_min min \
+    --edit_ratio_max 0.50
+
+# 示例：禁用某些指标
+# --enable_psnr False \
+# --enable_ssim False \
+
+# 示例：设置自定义范围
+# --psnr_min 10.0 \
+# --psnr_max 40.0 \
+# --ssim_min 0.7 \
+# --ssim_max 0.95 \
+# --l1_min 0.05 \
+# --l1_max 0.20 \
+# --l2_min 0.01 \
+# --l2_max 0.05 \
+# --edit_ratio_min 0.1 \
+# --edit_ratio_max 0.8
 
 echo "job end"
 
-# sbatch custom/filter.sh 运行脚本
+# sbatch custom/filter.sh
+# tail -f log/

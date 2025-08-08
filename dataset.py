@@ -1,9 +1,8 @@
 from functools import partial
 import numpy as np
 import torch
-from datasets import load_dataset, concatenate_datasets, Dataset, Features, Value, Image
+from datasets import load_dataset, concatenate_datasets
 from torchvision import transforms
-import random
 import os
 import json
 
@@ -81,10 +80,21 @@ def get_hugging_dataset(logger, instance_data_root, image_size, accelerator, tra
         logger.info(f"数据集样本数量({len(combined_dataset)})小于请求的训练集大小({train_size})，使用所有样本")
         train_dataset = combined_dataset
     
-    # 测试集：永远从 instructpix2pix 数据集中加载
-    logger.info("从 instructpix2pix 数据集中加载测试集")
-    instructpix2pix_dataset = load_dataset("/public/zhangzhiling/datasets/timbrooks___instructpix2pix-clip-filtered/default/0.0.0/aa665b890915f7a42f8615bee868a9f3447e178f")  # 加载 instructpix2pix 数据集
-    test_dataset = instructpix2pix_dataset["train"].select(range(test_size))  # 选择测试集样本
+    # 测试集：永远从 instructpix2pix 数据集末尾加载
+    logger.info("从 instructpix2pix 数据集末尾加载测试集")
+    instructpix2pix_dataset = load_dataset("/public/zhangzhiling/datasets/timbrooks___instructpix2pix-clip-filtered/default/0.0.0/aa665b890915f7a42f8615bee868a9f3447e178f")
+    
+    # 获取 instructpix2pix 数据集的总长度
+    instructpix2pix_total = len(instructpix2pix_dataset["train"])
+    
+    # 检查是否有足够的样本用于测试集
+    if instructpix2pix_total < test_size:
+        raise ValueError(f"instructpix2pix 数据集样本数量({instructpix2pix_total})不足以提供测试集({test_size})样本")
+    
+    # 从末尾选择测试集样本
+    test_start_idx = instructpix2pix_total - test_size
+    logger.info(f"从 instructpix2pix 数据集末尾选择测试集，范围: {test_start_idx} - {instructpix2pix_total-1}")
+    test_dataset = instructpix2pix_dataset["train"].select(range(test_start_idx, instructpix2pix_total))
     
     # 确保只有主进程执行数据集转换（如果有accelerator的话）
     if accelerator is not None:
@@ -155,11 +165,22 @@ def get_filtered_dataset(args, logger, image_size, accelerator, train_size=20000
     # 从原始数据集中选择对应的样本
     train_dataset = combined_original_dataset.select(train_indices)
     
-    # 测试集：仍然从原始 instructpix2pix 数据集中加载
-    logger.info("从 instructpix2pix 数据集中加载测试集")
+    # 测试集：永远从 instructpix2pix 数据集末尾加载
+    logger.info("从 instructpix2pix 数据集末尾加载测试集")
     instructpix2pix_dataset = load_dataset("/public/zhangzhiling/datasets/timbrooks___instructpix2pix-clip-filtered/default/0.0.0/aa665b890915f7a42f8615bee868a9f3447e178f")
-    test_dataset = instructpix2pix_dataset["train"].select(range(test_size))
     
+    # 获取 instructpix2pix 数据集的总长度
+    instructpix2pix_total = len(instructpix2pix_dataset["train"])
+    
+    # 检查是否有足够的样本用于测试集
+    if instructpix2pix_total < test_size:
+        raise ValueError(f"instructpix2pix 数据集样本数量({instructpix2pix_total})不足以提供测试集({test_size})样本")
+    
+    # 从末尾选择测试集样本
+    test_start_idx = instructpix2pix_total - test_size
+    logger.info(f"从 instructpix2pix 数据集末尾选择测试集，范围: {test_start_idx} - {instructpix2pix_total-1}")
+    test_dataset = instructpix2pix_dataset["train"].select(range(test_start_idx, instructpix2pix_total))
+
     # 确保只有主进程执行数据集转换
     with accelerator.main_process_first():
         # 应用预处理

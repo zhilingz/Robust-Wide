@@ -57,59 +57,84 @@ def setup_logging(output_dir):
     return logger
 
 class ImageFilter:
-    def __init__(self, model_dir="/public/zhangzhiling/models/timbrooks/instruct-pix2pix", weight_dtype=torch.float16, device="cuda"):
+    def __init__(self, args, model_dir="/public/zhangzhiling/models/timbrooks/instruct-pix2pix", weight_dtype=torch.float16, device="cuda", 
+                 metric_config=None):
         self.device = device
         self.model_dir = model_dir
         self.weight_dtype = weight_dtype
-        self.thresholds = {
-            'psnr': 12.5, 'ssim': 0.80, 'l1': 0.1, 'l2': 0.03, 'edit_ratio': 0.20 # 'edit_ratio_max': 0.20, 'edit_ratio_min': 0.10
+        self.args = args
+        
+        # 默认配置
+        default_config = {
+            'psnr': {'enabled': True, 'min': 15.0, 'max': float('inf')},
+            'ssim': {'enabled': True, 'min': 0.80, 'max': float('inf')},
+            'l1': {'enabled': True, 'min': float('-inf'), 'max': 0.15},
+            'l2': {'enabled': True, 'min': float('-inf'), 'max': 0.03},
+            'edit_ratio': {'enabled': True, 'min': float('-inf'), 'max': 0.50}
         }
+        
+        # 使用传入的配置或默认配置
+        self.metric_config = metric_config if metric_config is not None else default_config
+        
+        # 保持向后兼容的thresholds属性
+        self.thresholds = {
+            metric: config.get('max', float('inf')) if config.get('max', float('inf')) != float('inf') 
+                   else config.get('min', float('-inf'))
+            for metric, config in self.metric_config.items()
+        }
+        
         self.pipe = self.initialize_pipeline()
 
     def initialize_pipeline(self):
-        if "instruct-pix2pix" in self.model_dir or "magicbrush" in self.model_dir:
+        if self.model_dir.split("/")[-1] == "magicbrush-jul7":
             pipe = CustomStableDiffusionInstructPix2PixPipeline.from_pretrained(
                 self.model_dir, torch_dtype=self.weight_dtype, local_files_only=True
             ).to(self.device)
-        elif "sd-turbo" in self.model_dir:
-            from custom.custom_i2i import CustomStableDiffusionImg2ImgPipeline
-            pipe = CustomStableDiffusionImg2ImgPipeline.from_pretrained(
-                self.model_dir, torch_dtype=self.weight_dtype, local_files_only=True
+            # load and fuse lcm lora
+            from diffusers import LCMScheduler
+            pipe.scheduler = LCMScheduler.from_config(pipe.scheduler.config)
+            pipe.load_lora_weights(
+                "latent-consistency/lcm-lora-sdv1-5", local_files_only=True,
+                weight_name="pytorch_lora_weights.safetensors")
+        elif self.model_dir.split("/")[-1] == "instruct-pix2pix" and self.args.reverse_filter:
+            from diffusers import StableDiffusionInstructPix2PixPipeline, EulerAncestralDiscreteScheduler
+            pipe = StableDiffusionInstructPix2PixPipeline.from_pretrained(
+                "/public/zhangzhiling/models/timbrooks/instruct-pix2pix",
+                torch_dtype=self.weight_dtype,
+                local_files_only=True,
+                safety_checker=None
             ).to(self.device)
-        elif "sd-x2-latent-upscaler" in self.model_dir:
-            from custom.custom_sd import CustomStableDiffusionPipeline, CustomStableDiffusionLatentUpscalePipeline
-            pipe = CustomStableDiffusionPipeline.from_pretrained(
-                "CompVis/stable-diffusion-v1-4", torch_dtype=self.weight_dtype, local_files_only=True
-            ).to(self.device)
-            upscaler = CustomStableDiffusionLatentUpscalePipeline.from_pretrained(
-                self.model_dir, torch_dtype=self.weight_dtype, local_files_only=True
-            ).to(self.device)
-            pipe = [pipe, upscaler]
+            # 单独设置调度器
+            pipe.scheduler = EulerAncestralDiscreteScheduler.from_config(pipe.scheduler.config)
+        # elif self.model_dir.split("/")[-1] == "sd-turbo":
+        #     from custom.custom_i2i import CustomStableDiffusionImg2ImgPipeline
+        #     pipe = CustomStableDiffusionImg2ImgPipeline.from_pretrained(
+        #         self.model_dir, torch_dtype=self.weight_dtype, local_files_only=True
+        #     ).to(self.device)
+        # elif self.model_dir.split("/")[-1] == "sd-x2-latent-upscaler":
+        #     from custom.custom_sd import CustomStableDiffusionPipeline, CustomStableDiffusionLatentUpscalePipeline
+        #     pipe = CustomStableDiffusionPipeline.from_pretrained(
+        #         "CompVis/stable-diffusion-v1-4", torch_dtype=self.weight_dtype, local_files_only=True
+        #     ).to(self.device)
+        #     upscaler = CustomStableDiffusionLatentUpscalePipeline.from_pretrained(
+        #         self.model_dir, torch_dtype=self.weight_dtype, local_files_only=True
+        #     ).to(self.device)
+        #     pipe = [pipe, upscaler]
         else:
             raise ValueError("model not supported")
 
-        # 不同模型不同scheduler
-        if "magicbrush" in self.model_dir:
-            from diffusers import EulerAncestralDiscreteScheduler
-            pipe.scheduler = EulerAncestralDiscreteScheduler.from_config(pipe.scheduler.config)
-        elif "instruct-pix2pix-distill" in self.model_dir:
-            from diffusers import LCMScheduler
-            pipe.scheduler = LCMScheduler.from_config(pipe.scheduler.config)
-            # Adapt the InstructPix2Pix model using the LoRA parameters
-            pipe.load_lora_weights("latent-consistency/lcm-lora-sdv1-5")
-
-            # 冻结参数
-        if "sd-x2-latent-upscaler" in self.model_dir:
+        # 冻结参数
+        if self.model_dir.split("/")[-1] == "sd-x2-latent-upscaler":
             for p in pipe:
                 p.freeze_params()
                 p.text_encoder.train()
                 p.unet.train()
                 p.vae.train()
-        else:
-            pipe.freeze_params()
-            pipe.text_encoder.train()
-            pipe.unet.train()
-            pipe.vae.train()
+        # else:
+        #     pipe.freeze_params()
+        #     pipe.text_encoder.train()
+        #     pipe.unet.train()
+        #     pipe.vae.train()
 
         return pipe
 
@@ -117,7 +142,7 @@ class ImageFilter:
         generator = torch.Generator(device=self.device).manual_seed(seed)
 
         with torch.no_grad():
-            if "instruct-pix2pix-distill" in self.model_dir:
+            if self.model_dir.split("/")[-1] == "instruct-pix2pix-distill":
                 generated_image = self.pipe(
                     prompt, 
                     image=image, 
@@ -128,7 +153,7 @@ class ImageFilter:
                     generator=generator,
                     output_type="pt"
                 )
-            elif "sd-turbo" in self.model_dir:
+            elif self.model_dir.split("/")[-1] == "sd-turbo":
                 generated_image = self.pipe(
                     prompt, 
                     image=image, 
@@ -140,27 +165,38 @@ class ImageFilter:
                     output_type="pt"
                 ).images     # pipe返回值为StableDiffusionPipelineOutput 类型，需要取images，形状 (1, C, H, W)
                 generated_image = 2 * generated_image - 1 # 将值域从[-1,1]转为[0,1]，防止图片泛白
-            elif "magicbrush" in self.model_dir:
+            elif self.model_dir.split("/")[-1] == "magicbrush-jul7":
                 generated_image = self.pipe(
                     prompt, 
                     image=image, 
-                    num_inference_steps=20, 
-                    image_guidance_scale=2.0, 
-                    guidance_scale=4, 
+                    num_inference_steps=3, 
+                    image_guidance_scale=1.0, 
+                    guidance_scale=1, 
                     generator=generator,
                     output_type="pt",
                     )
-            else:
+            elif self.model_dir.split("/")[-1] == "instruct-pix2pix" and self.args.reverse_filter:                
                 generated_image = self.pipe(
-                    prompt, 
-                    image=image, 
-                    num_images_per_prompt=1, 
-                    num_inference_steps=20,
-                    guidance_scale=10, 
-                    image_guidance_scale=1.5, # 1.5原图保留太少（62.98%的编辑区域），2.0还可以（38.45%的编辑区域）
+                    prompt,
+                    image=image,
+                    num_images_per_prompt=1,
+                    num_inference_steps=10,
+                    guidance_scale=10,
+                    image_guidance_scale=1.5,
                     generator=generator,
                     output_type="pt",
-                )
+                ).images[0]
+            # else:
+            #     generated_image = self.pipe(
+            #         prompt, 
+            #         image=image, 
+            #         num_images_per_prompt=1, 
+            #         num_inference_steps=20,
+            #         guidance_scale=10, 
+            #         image_guidance_scale=1.5, # 1.5原图保留太少（62.98%的编辑区域），2.0还可以（38.45%的编辑区域）
+            #         generator=generator,
+            #         output_type="pt",
+            #     )
         return generated_image
     
     def _to_tensor(self, image):
@@ -188,7 +224,6 @@ class ImageFilter:
         mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel_elem, iterations=1)
         
         return mask.sum() / 255 / mask.size, mask
-
         
     def calculate_metrics(self, before, after):
         before = self._to_tensor(before)
@@ -213,7 +248,6 @@ class ImageFilter:
         metrics['ssim'] = torch.mean(ssim_val).item() if ssim_val.dim() > 0 else ssim_val.item()
         
         return metrics, mask
-
     
     def create_comparison_image(self, original_image, generated_image, mask, prompt=None):
         """
@@ -295,29 +329,34 @@ class ImageFilter:
         numpy_image = (numpy_image * 255).astype(np.uint8)
         return PILImage.fromarray(numpy_image)
 
-    def filter_and_save_dataset(self, dataset, output_dir, filter_num, original_dataset_path=None):
+    def filter_and_save_dataset(self, dataset, output_dir, filter_num, original_dataset_path=None, reverse_filter=False):
         """
         合并的数据集筛选、日志记录和保存函数
         只保存通过筛选的样本ID，不保存实际图片和prompt
         """
         pass_count = 0
         total_samples = len(dataset)
-        train_dataloader = DataLoader(
-            dataset,
-            batch_size=1,
-            drop_last=True,
-            shuffle=True,
-            collate_fn=collate_fn,
-        )
-
-        # 统计指标
-        all_metrics = []
+        
+        # 根据reverse_filter决定数据遍历顺序
+        if reverse_filter:
+            # 从末尾开始，创建反向索引
+            indices = list(range(total_samples - 1, -1, -1))
+            logger.info("启用reverse_filter：从数据集末尾开始选取")
+        else:
+            # 正常顺序
+            indices = list(range(total_samples))
+        
+        # 统计指标，用来保存每一个指标的最大值和最小值以及平均值
+        all_metrics = {}
+        # 用于计算平均值的累计值和计数
+        metrics_sum = {}
+        metrics_count = 0
         
         # 创建输出目录
         os.makedirs(output_dir, exist_ok=True)
         
         logger.info(f"开始筛选数据集，总样本数: {total_samples}")
-        logger.info(f"筛选阈值: {self.thresholds}")
+        logger.info(f"筛选配置: {self.metric_config}")
         logger.info(f"输出目录: {output_dir}")
         
         # 初始化保存数据结构 - 只保存样本ID和指标
@@ -327,139 +366,98 @@ class ImageFilter:
             "filter_stats": {}
         }
         
-        # 添加一个函数来保存当前进度的metadata
-        def save_metadata_checkpoint(current_pass_count, current_metrics, processed_samples):
-            """保存当前进度的metadata"""
-            checkpoint_stats = {}
+        # 保存metadata的函数
+        def save_metadata():
+            # 计算每个指标的平均值
+            final_metrics = {}
+            for metric_name in all_metrics:
+                final_metrics[metric_name] = {
+                    "min": all_metrics[metric_name]["min"],
+                    "max": all_metrics[metric_name]["max"],
+                    "avg": metrics_sum[metric_name] / metrics_count if metrics_count > 0 else 0
+                }
             
-            if current_metrics:
-                # 计算各指标的统计信息
-                psnr_values = [m['psnr'] for m in current_metrics]
-                ssim_values = [m['ssim'] for m in current_metrics]
-                l1_values = [m['l1'] for m in current_metrics]
-                l2_values = [m['l2'] for m in current_metrics]
-                edit_ratio_values = [m['edit_ratio'] for m in current_metrics]
-                
-                checkpoint_stats.update({
-                    "psnr_mean": np.mean(psnr_values),
-                    "ssim_mean": np.mean(ssim_values),
-                    "l1_mean": np.mean(l1_values),
-                    "l2_mean": np.mean(l2_values),
-                    "edit_ratio_mean": np.mean(edit_ratio_values),
-                    "pass": current_pass_count,
-                    "processed": processed_samples,
-                    "total": total_samples,
-                    "pass_rate": current_pass_count / processed_samples if processed_samples > 0 else 0
-                })
-            
-            # 更新保存数据的统计信息
-            temp_saved_data = saved_data.copy()
-            temp_saved_data["filter_stats"].update(checkpoint_stats)
-            
-            # 保存检查点metadata
-            checkpoint_path = os.path.join(output_dir, "metadata.json")
-            with open(checkpoint_path, 'w', encoding='utf-8') as f:
-                json.dump(temp_saved_data, f, ensure_ascii=False, indent=2)
-            
-            logger.info(f"已保存检查点 - 处理样本: {processed_samples}, 通过筛选: {current_pass_count}")
+            saved_data["filter_stats"] = {
+                "pass": pass_count,
+                "total": enum_i + 1,
+                "pass_rate": pass_count / (enum_i + 1),
+                "metrics_stats": final_metrics  # 包含每个指标的最大值、最小值以及平均值
+            }
+            with open(os.path.join(output_dir, "metadata.json"), 'w', encoding='utf-8') as f:
+                json.dump(saved_data, f, ensure_ascii=False, indent=2)
         
         with torch.no_grad():
-            for i, example in enumerate(train_dataloader):
+            for enum_i, idx in enumerate(indices):
                 # 筛选filter_num个样本
                 if pass_count >= filter_num:
                     break
 
+                # 获取样本并处理
+                example = dataset[idx]
                 image, prompt = example["image"], example["prompt"]
+                
+                if not isinstance(image, torch.Tensor):
+                    image = torch.tensor(image)
                 image = image.to(self.device)
+                if len(image.shape) == 4:
+                    image = image[0]
+                
                 assert image.shape[-1] == 512 and image.shape[-2] == 512, f"image size must be 512x512, got {image.shape}"
 
-                generated_image = self.generate_image(prompt, image)
-                if generated_image is None:
-                    logger.warning(f"样本 {i}: 图像生成失败")
-                    continue
-                
+                generated_image = self.generate_image([prompt] if isinstance(prompt, str) else prompt, image.unsqueeze(0))
                 metrics, mask = self.calculate_metrics(image, generated_image)
-                if metrics is None:
-                    logger.warning(f"样本 {i}: 指标计算失败")
-                    continue
 
-                passed = all([metrics['psnr'] >= self.thresholds['psnr'],
-                            # metrics['ssim'] >= self.thresholds['ssim'],
-                            # metrics['l1'] <= self.thresholds['l1'],
-                            # metrics['l2'] <= self.thresholds['l2'],
-                            # # metrics['edit_ratio'] <= self.thresholds['edit_ratio_max'],
-                            # # metrics['edit_ratio'] >= self.thresholds['edit_ratio_min']
-                            # metrics['edit_ratio'] <= self.thresholds['edit_ratio']
-                        ])
+                # 简化的筛选逻辑
+                passed = True
+                for metric_name, metric_value in metrics.items():
+                    if metric_name in self.metric_config:
+                        config = self.metric_config[metric_name]
+                        if not config.get('enabled', True):
+                            continue
+                        
+                        min_val = config.get('min', float('-inf'))
+                        max_val = config.get('max', float('inf'))
+                        
+                        if (min_val != float('-inf') and metric_value < min_val) or \
+                           (max_val != float('inf') and metric_value > max_val):
+                            passed = False
+                            break
                     
                 if passed:
                     # 只保存样本ID和指标，不保存图片
                     pass_count += 1
-                    all_metrics.append(metrics)
-
-                    # 保存样本ID和指标信息
-                    saved_data["filtered_sample_ids"].append({
-                        "sample_id": i,  # 原始数据集中的索引
-                        "metrics": metrics
-                    })
-
-                    # 记录详细日志
-                    log_dict = {
-                        "sample_idx": i,
+                    
+                    # 更新每个指标的最大值、最小值和累计值（用于计算平均值）
+                    metrics_count += 1
+                    for metric_name, metric_value in metrics.items():
+                        if metric_name not in all_metrics:
+                            all_metrics[metric_name] = {"min": metric_value, "max": metric_value}
+                            metrics_sum[metric_name] = metric_value
+                        else:
+                            all_metrics[metric_name]["min"] = min(all_metrics[metric_name]["min"], metric_value)
+                            all_metrics[metric_name]["max"] = max(all_metrics[metric_name]["max"], metric_value)
+                            metrics_sum[metric_name] += metric_value
+                    
+                    saved_data["filtered_sample_ids"].append({"sample_id": idx, "metrics": metrics})
+                    
+                    logger.info({
+                        "sample_idx": idx,
                         "psnr": metrics['psnr'],
                         "ssim": metrics['ssim'],
                         "l1": metrics['l1'],
                         "l2": metrics['l2'],
                         "edit_ratio": metrics['edit_ratio'],
-                        "pass_rate": pass_count / (i + 1)
-                    }
-                    logger.info(log_dict)
+                        "pass_rate": pass_count / (enum_i + 1)
+                    })
                 
-                # 每处理10000个样本保存一次metadata（无论是否通过筛选）
-                if (i + 1) % 10000 == 0:
-                    save_metadata_checkpoint(pass_count, all_metrics, i + 1)
+                # 每通过2000个样本保存一次metadata
+                if pass_count % 2000 == 0 and pass_count > 0:
+                    save_metadata()
+                    logger.info(f"检查点 - 处理: {enum_i + 1}, 通过: {pass_count}")
 
-        # 最终统计
-        final_stats = {}
-        
-        if all_metrics:
-            # 计算各指标的统计信息
-            psnr_values = [m['psnr'] for m in all_metrics]
-            ssim_values = [m['ssim'] for m in all_metrics]
-            l1_values = [m['l1'] for m in all_metrics]
-            l2_values = [m['l2'] for m in all_metrics]
-            edit_ratio_values = [m['edit_ratio'] for m in all_metrics]
-            
-            final_stats.update({
-                "psnr_mean": np.mean(psnr_values),
-                "ssim_mean": np.mean(ssim_values),
-                "l1_mean": np.mean(l1_values),
-                "l2_mean": np.mean(l2_values),
-                "edit_ratio_mean": np.mean(edit_ratio_values),
-                "pass": pass_count,
-                "total": total_samples,
-                "pass_rate": pass_count / total_samples if total_samples > 0 else 0
-            })
-        
-        # 更新保存数据的统计信息
-        saved_data["filter_stats"].update(final_stats)
-        
-        # 保存最终元数据
-        if pass_count > 0:
-            # 确保保存原始数据集路径
-            saved_data["original_dataset_path"] = original_dataset_path
-            
-            with open(os.path.join(output_dir, "metadata.json"), 'w', encoding='utf-8') as f:
-                json.dump(saved_data, f, ensure_ascii=False, indent=2)
-            
-            logger.info(f"已保存 {pass_count} 个筛选后的样本ID到 {output_dir}")
-        else:
-            logger.warning("没有样本通过筛选，未保存任何文件")
-        
-        logger.info("=" * 50)
-        logger.info("筛选完成 - 最终统计:")
-        logger.info(json.dumps(final_stats, indent=2, ensure_ascii=False))
-        logger.info("=" * 50)
+        # 最终保存
+        save_metadata()
+        logger.info(f"筛选完成")
 
 def load_dataset_simple(dataset_dir):
     print("正在加载数据集...")
@@ -477,32 +475,130 @@ def load_dataset_simple(dataset_dir):
 
     return combined_dataset
 
-def load_filtered_dataset(data_dir):
-    """
-    从筛选后的数据集中加载样本ID信息
-    """
-    with open(os.path.join(data_dir, "metadata.json"), 'r', encoding='utf-8') as f:
-        metadata = json.load(f)
-    
-    # 返回筛选后的样本ID列表
-    return metadata["filtered_sample_ids"]
-
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--filter_num", type=int, default=1000, help="筛选数量")
     parser.add_argument("--data_dir", type=str, default="/public/zhangzhiling/datasets/timbrooks___instructpix2pix-clip-filtered/default/0.0.0/aa665b890915f7a42f8615bee868a9f3447e178f", help="数据集路径")
     parser.add_argument("--model_dir", type=str, default="/public/zhangzhiling/models/timbrooks/instruct-pix2pix", help="模型路径")
     parser.add_argument("--output_dir", type=str, default="./filtered_datasets/minmax1000/", help="输出路径")
+    
+    # 为每个指标添加启用/禁用选项
+    parser.add_argument("--enable_psnr", type=lambda x: x.lower() == 'true', default=True, help="启用PSNR筛选 (True/False)")
+    parser.add_argument("--enable_ssim", type=lambda x: x.lower() == 'true', default=True, help="启用SSIM筛选 (True/False)")
+    parser.add_argument("--enable_l1", type=lambda x: x.lower() == 'true', default=True, help="启用L1筛选 (True/False)")
+    parser.add_argument("--enable_l2", type=lambda x: x.lower() == 'true', default=True, help="启用L2筛选 (True/False)")
+    parser.add_argument("--enable_edit_ratio", type=lambda x: x.lower() == 'true', default=True, help="启用编辑比例筛选 (True/False)")
+    
+    # 为每个指标添加最大值和最小值参数
+    parser.add_argument("--psnr_min", type=str, default="15.0", help="PSNR最小值，使用'min'表示无下限")
+    parser.add_argument("--psnr_max", type=str, default="max", help="PSNR最大值，使用'max'表示无上限")
+    parser.add_argument("--ssim_min", type=str, default="0.80", help="SSIM最小值，使用'min'表示无下限")
+    parser.add_argument("--ssim_max", type=str, default="max", help="SSIM最大值，使用'max'表示无上限")
+    parser.add_argument("--l1_min", type=str, default="min", help="L1最小值，使用'min'表示无下限")
+    parser.add_argument("--l1_max", type=str, default="0.15", help="L1最大值，使用'max'表示无上限")
+    parser.add_argument("--l2_min", type=str, default="min", help="L2最小值，使用'min'表示无下限")
+    parser.add_argument("--l2_max", type=str, default="0.03", help="L2最大值，使用'max'表示无上限")
+    parser.add_argument("--edit_ratio_min", type=str, default="min", help="编辑比例最小值，使用'min'表示无下限")
+    parser.add_argument("--edit_ratio_max", type=str, default="0.50", help="编辑比例最大值，使用'max'表示无上限")
+    
+    # 添加reverse_filter参数
+    parser.add_argument("--reverse_filter", type=lambda x: x.lower() == 'true', default=False, help="从数据集末尾开始选取 (True/False)")
+    
     args = parser.parse_args()
     
     filter_num = args.filter_num
     data_dir = args.data_dir
     model_dir = args.model_dir
-    output_dir = os.path.join(args.output_dir, args.data_dir.split("/")[4], args.model_dir.split("/")[-1])
     
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print(f"使用设备: {device}")
     
+    # 根据parser参数直接生成动态目录名
+    def generate_output_dirname(args):
+        """根据命令行参数直接生成输出目录名"""
+        result = ""
+        
+        # 检查每个指标是否启用并直接拼接到result
+        if args.enable_psnr:
+            result += "psnr"
+            result += "_" if args.psnr_min == 'min' else f"{args.psnr_min}"
+            result += "_" if args.psnr_max == 'max' else f"{args.psnr_max}"
+
+        if args.enable_ssim:
+            result += "ssim"
+            result += "_" if args.ssim_min == 'min' else f"{args.ssim_min}"
+            result += "_" if args.ssim_max == 'max' else f"{args.ssim_max}"
+
+        if args.enable_l1:
+            result += "l1"
+            result += "_" if args.l1_min == 'min' else f"{args.l1_min}"
+            result += "_" if args.l1_max == 'max' else f"{args.l1_max}"
+
+        if args.enable_l2:
+            result += "l2"
+            result += "_" if args.l2_min == 'min' else f"{args.l2_min}"
+            result += "_" if args.l2_max == 'max' else f"{args.l2_max}"
+
+        if args.enable_edit_ratio:
+            result += "edit"
+            result += "_" if args.edit_ratio_min == 'min' else f"{args.edit_ratio_min}"
+            result += "_" if args.edit_ratio_max == 'max' else f"{args.edit_ratio_max}"
+        
+        # 添加filter_num，直接连接
+        result += f"num{args.filter_num}"
+        
+        return result
+    
+    # 生成新的输出目录名
+    dynamic_dirname = generate_output_dirname(args)
+    
+    # 如果启用了reverse_filter，在目录名后面添加_reverse
+    if args.reverse_filter:
+        dynamic_dirname += "_reverse"
+    
+    output_dir = os.path.join(args.output_dir, dynamic_dirname, args.data_dir.split("/")[4], args.model_dir.split("/")[-1])
+    print(f"输出目录: {output_dir}")
+    
+    # 创建指标配置
+    def parse_value(value, value_type):
+        """解析命令行参数值，处理'min'和'max'特殊值"""
+        if isinstance(value, str):
+            if value == "min":
+                return float('-inf')
+            elif value == "max":
+                return float('inf')
+            else:
+                return value_type(value)
+        return value
+    
+    metric_config = {
+        'psnr': {
+            'enabled': args.enable_psnr,
+            'min': parse_value(args.psnr_min, float),
+            'max': parse_value(args.psnr_max, float)
+        },
+        'ssim': {
+            'enabled': args.enable_ssim,
+            'min': parse_value(args.ssim_min, float),
+            'max': parse_value(args.ssim_max, float)
+        },
+        'l1': {
+            'enabled': args.enable_l1,
+            'min': parse_value(args.l1_min, float),
+            'max': parse_value(args.l1_max, float)
+        },
+        'l2': {
+            'enabled': args.enable_l2,
+            'min': parse_value(args.l2_min, float),
+            'max': parse_value(args.l2_max, float)
+        },
+        'edit_ratio': {
+            'enabled': args.enable_edit_ratio,
+            'min': parse_value(args.edit_ratio_min, float),
+            'max': parse_value(args.edit_ratio_max, float)
+        }
+    }
+
     # 设置日志记录
     setup_logging(output_dir)
     
@@ -511,31 +607,25 @@ def main():
         "dataset_dir": data_dir,
         "output_dir": output_dir,
         "model_dir": model_dir,
-        "device": device
+        "device": device,
+        "filter_num": filter_num,
+        "metric_config": metric_config
     }
     logger.info("筛选配置:")
     logger.info(json.dumps(config, indent=2, ensure_ascii=False))
     logger.info(f"SLURM_JOB_ID: {os.environ.get('SLURM_JOB_ID', '')}")
     if device == "cuda":
         torch.cuda.empty_cache()
-    
+
     # 加载数据集和筛选
     dataset = load_dataset_simple(data_dir)
-    image_filter = ImageFilter(model_dir=model_dir, device=device)
+    image_filter = ImageFilter(args=args, model_dir=model_dir, device=device, metric_config=metric_config)
     
     # 在metadata中保存原始数据集路径
     image_filter.original_dataset_path = data_dir
     
     # 使用带日志记录的筛选函数
-    image_filter.filter_and_save_dataset(dataset, output_dir, filter_num, original_dataset_path=data_dir)
-
-    print("\n测试加载筛选后的数据集...")
-    filtered_sample_ids = load_filtered_dataset(output_dir)
-    print(f"加载成功，筛选后的样本数: {len(filtered_sample_ids)}")
-    
-    # 显示前几个样本的ID
-    for i, sample_info in enumerate(filtered_sample_ids[:3]):
-        print(f"样本 {i+1}: 原始数据集索引 {sample_info['sample_id']}, PSNR: {sample_info['metrics']['psnr']:.2f}")
+    image_filter.filter_and_save_dataset(dataset, output_dir, filter_num, original_dataset_path=data_dir, reverse_filter=args.reverse_filter)
 
 if __name__ == "__main__":
     main()

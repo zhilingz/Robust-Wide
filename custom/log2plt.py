@@ -21,6 +21,10 @@ psnr_values = []
 error_rate_before_edit_values = []
 error_rate_after_edit_values = []
 
+# 存储每次测试的edit_distortion_BER值
+edit_distortion_ber_values = []
+edit_distortion_ber_timestamps = []
+
 # 测试结果变量
 test_avg_psnr = None
 test_avg_ssim = None
@@ -103,7 +107,8 @@ test_pattern = r"""
         'random_crop_BER':\s*([\d.eE+-]+),\s*
         'random_rotation_BER':\s*([\d.eE+-]+),\s*
         'psnr':\s*([\d.eE+-]+),\s*
-        'ssim':\s*([\d.eE+-]+)
+        'ssim':\s*([\d.eE+-]+),\s*
+        'global_step':\s*(\d+)
     \}
 """
 
@@ -162,6 +167,11 @@ with open(log_file, "r") as f:
             test_random_rotation  = float(test_match.group(16))
             test_avg_psnr         = float(test_match.group(17))
             test_avg_ssim         = float(test_match.group(18))
+            test_global_step      = int(test_match.group(19))
+            
+            # 保存edit_distortion_BER值和对应的global_step
+            edit_distortion_ber_values.append(test_edit_distortion)
+            edit_distortion_ber_timestamps.append(test_global_step)
 
 # 创建折线图
 plt.figure(figsize=(12, 18))
@@ -190,6 +200,13 @@ plt.grid(True)
 plt.subplot(3, 1, 3)
 plt.plot(global_steps, error_rate_before_edit_values, label="Error Rate Before Edit", color="brown")
 plt.plot(global_steps, error_rate_after_edit_values, label="Error Rate After Edit", color="gray")
+
+# 如果有edit_distortion_BER的测试结果，添加为曲线
+if edit_distortion_ber_values:
+    # 现在edit_distortion_ber_timestamps存储的是global_step值，可以直接使用
+    plt.plot(edit_distortion_ber_timestamps, edit_distortion_ber_values, 
+            label="Edit Distortion BER", color="purple", marker="o", linestyle="--", linewidth=2)
+
 plt.xlabel("Global Step")
 plt.ylabel("Error Rate")
 plt.title("Error Rate Before and After Edit vs Global Step")
