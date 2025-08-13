@@ -10,3 +10,5 @@ __init__.py
 metrics_output/
 WAVES/
 examples/step20000/
+evaluate/
+Step1X-Edit/

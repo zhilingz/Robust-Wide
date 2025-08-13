@@ -55,7 +55,7 @@ image = load_local_image(image_path)
 
 num_inference_steps = 3
 image_guidance_scale = 1.0
-guidance_scale = 1
+guidance_scale = 2.0
 # num_inference_steps = 20
 # image_guidance_scale = 1.5
 # guidance_scale = 7
@@ -64,7 +64,8 @@ class MagicBrush():
         self.pipe = StableDiffusionInstructPix2PixPipeline.from_pretrained(
                         weight, 
                         torch_dtype=torch.float16,
-                        local_files_only=True
+                        local_files_only=True,
+                        use_safetensors=False
                     )
         # self.pipe.scheduler = EulerAncestralDiscreteScheduler.from_config(self.pipe.scheduler.config)
         self.pipe.load_lora_weights(
@@ -85,7 +86,6 @@ class MagicBrush():
             generator=generator).images
         return image
     
-
 model = MagicBrush()
 # model.pipe.text_encoder.eval()
 # model.pipe.unet.eval()
@@ -97,10 +97,10 @@ save_dir = "inference_results/llm_test_MagicBrush_"+str(num_inference_steps)+"_"
 images[0].save(save_dir)
 print(save_dir)
 
+
 # image_output2 = model.infer_one_image(wm_image, prompt, 42)
 # output_path2 = "inference_results/generated_image_7.png"
 # image_output2.save(output_path2)
-
 
 # 调用脚本，生成inference、频谱图、编辑区域图、log图
 # cmd = f'python custom/diff.py --before "{image_path}" --after "{output_path}"'
@@ -134,14 +134,16 @@ print(save_dir)
 # pipe.to("cuda")
 # pipe.scheduler = EulerAncestralDiscreteScheduler.from_config(pipe.scheduler.config)
 # before_image = "inference_results/timbrooks___instructpix2pix-clip-filtered/original_2.png"
+# # before_image = "/public/zhangzhiling/code/Robust-Wide/train_results/2025-06-08T11-00-36_timbrooks___instructpix2pix-clip-filtered_magicbrush-jul7/step4000/image.png"
 # image = PIL.Image.open(before_image)
 # # image = PIL.Image.open("examples/Venus.jpg")
 # image = image.convert("RGB")
 # prompt = "put her in a windmill"
 # # prompt = "turn him into cyborg"
+# # prompt = "have her be a zombie"
 # num_inference_steps = 10
-# image_guidance_scale = 1.0
-# guidance_scale = 7.5
+# image_guidance_scale = 1.5
+# guidance_scale = 5
 # images = pipe(prompt, image=image, 
 #               num_inference_steps=num_inference_steps, 
 #               image_guidance_scale=image_guidance_scale, 
@@ -156,6 +158,7 @@ print(save_dir)
 import torch.nn.functional as F
 from torchvision import transforms
 from kornia.metrics import psnr, ssim
+import lpips
 
 # 将PIL图像转换为tensor
 def pil_to_tensor(pil_image):
@@ -177,6 +180,9 @@ psnr_value = psnr(generated_01, original_01, max_val=1.0).item()
 ssim_value = torch.mean(ssim(generated_01, original_01, window_size=5)).item()
 l1_value = F.l1_loss(generated_tensor, original_tensor).item()
 l2_value = F.mse_loss(generated_tensor, original_tensor).item()
+lpips_fn = lpips.LPIPS(net='vgg', verbose=False).to("cuda")  # 使用AlexNet作为特征提取器
+lpips_value = lpips_fn(original_tensor, generated_tensor).item()
+
 
 # 输出结果
 print(f"图像质量指标:")
@@ -184,6 +190,7 @@ print(f"PSNR: {psnr_value:.4f} dB")
 print(f"SSIM: {ssim_value:.4f}")
 print(f"L1 Loss: {l1_value:.6f}")
 print(f"L2 Loss: {l2_value:.6f}")
+print(f"LPIPS: {lpips_value:.6f}")
 
 # # 调用脚本，生成inference、频谱图、编辑区域图、log图
 # cmd = f'python custom/diff.py --before "{before_image}" --after "{save_dir}"'

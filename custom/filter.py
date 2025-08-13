@@ -9,6 +9,7 @@ from dataset import collate_fn
 from PIL import Image as PILImage
 from torchvision import transforms
 from kornia.metrics import psnr, ssim
+import lpips
 import json
 import logging
 import datetime
@@ -70,7 +71,8 @@ class ImageFilter:
             'ssim': {'enabled': True, 'min': 0.80, 'max': float('inf')},
             'l1': {'enabled': True, 'min': float('-inf'), 'max': 0.15},
             'l2': {'enabled': True, 'min': float('-inf'), 'max': 0.03},
-            'edit_ratio': {'enabled': True, 'min': float('-inf'), 'max': 0.50}
+            'edit_ratio': {'enabled': True, 'min': float('-inf'), 'max': 0.50},
+            'lpips': {'enabled': True, 'min': float('-inf'), 'max': 0.5}
         }
         
         # 使用传入的配置或默认配置
@@ -82,6 +84,9 @@ class ImageFilter:
                    else config.get('min', float('-inf'))
             for metric, config in self.metric_config.items()
         }
+        
+        # 初始化LPIPS模型
+        self.lpips_fn = lpips.LPIPS(net='alex', verbose=False).to(self.device)
         
         self.pipe = self.initialize_pipeline()
 
@@ -130,6 +135,10 @@ class ImageFilter:
                 p.text_encoder.train()
                 p.unet.train()
                 p.vae.train()
+        elif self.model_dir.split("/")[-1] == "instruct-pix2pix" and self.args.reverse_filter:
+            pipe.text_encoder.eval()
+            pipe.unet.eval()
+            pipe.vae.eval() 
         # else:
         #     pipe.freeze_params()
         #     pipe.text_encoder.train()
@@ -142,50 +151,50 @@ class ImageFilter:
         generator = torch.Generator(device=self.device).manual_seed(seed)
 
         with torch.no_grad():
-            if self.model_dir.split("/")[-1] == "instruct-pix2pix-distill":
-                generated_image = self.pipe(
-                    prompt, 
-                    image=image, 
-                    num_images_per_prompt=1, 
-                    num_inference_steps=4,  # 4改为2，测试效果
-                    guidance_scale=2.0,     # 使用较小的guidance_scale
-                    image_guidance_scale=1.0,  # 使用较小的image_guidance_scale
-                    generator=generator,
-                    output_type="pt"
-                )
-            elif self.model_dir.split("/")[-1] == "sd-turbo":
-                generated_image = self.pipe(
-                    prompt, 
-                    image=image, 
-                    num_images_per_prompt=1, 
-                    num_inference_steps=2,
-                    guidance_scale=0.0, 
-                    strength=0.5,
-                    generator=generator,
-                    output_type="pt"
-                ).images     # pipe返回值为StableDiffusionPipelineOutput 类型，需要取images，形状 (1, C, H, W)
-                generated_image = 2 * generated_image - 1 # 将值域从[-1,1]转为[0,1]，防止图片泛白
-            elif self.model_dir.split("/")[-1] == "magicbrush-jul7":
-                generated_image = self.pipe(
-                    prompt, 
-                    image=image, 
-                    num_inference_steps=3, 
-                    image_guidance_scale=1.0, 
-                    guidance_scale=1, 
-                    generator=generator,
-                    output_type="pt",
-                    )
-            elif self.model_dir.split("/")[-1] == "instruct-pix2pix" and self.args.reverse_filter:                
+            if self.model_dir.split("/")[-1] == "instruct-pix2pix" and self.args.reverse_filter:                
                 generated_image = self.pipe(
                     prompt,
                     image=image,
                     num_images_per_prompt=1,
-                    num_inference_steps=10,
-                    guidance_scale=10,
-                    image_guidance_scale=1.5,
+                    num_inference_steps=self.args.num_inference_steps, #10
+                    guidance_scale=self.args.guidance_scale, #7.5
+                    image_guidance_scale=self.args.image_guidance_scale, #1.5
                     generator=generator,
                     output_type="pt",
                 ).images[0]
+            elif self.model_dir.split("/")[-1] == "magicbrush-jul7":
+                generated_image = self.pipe(
+                    prompt, 
+                    image=image, 
+                    num_inference_steps=self.args.num_inference_steps, #3
+                    image_guidance_scale=self.args.image_guidance_scale, #1.0
+                    guidance_scale=self.args.guidance_scale, #1
+                    generator=generator,
+                    output_type="pt",
+                    )
+            # elif self.model_dir.split("/")[-1] == "instruct-pix2pix-distill":
+            #     generated_image = self.pipe(
+            #         prompt, 
+            #         image=image, 
+            #         num_images_per_prompt=1, 
+            #         num_inference_steps=4,  # 4改为2，测试效果
+            #         guidance_scale=2.0,     # 使用较小的guidance_scale
+            #         image_guidance_scale=1.0,  # 使用较小的image_guidance_scale
+            #         generator=generator,
+            #         output_type="pt"
+            #     )
+            # elif self.model_dir.split("/")[-1] == "sd-turbo":
+            #     generated_image = self.pipe(
+            #         prompt, 
+            #         image=image, 
+            #         num_images_per_prompt=1, 
+            #         num_inference_steps=2,
+            #         guidance_scale=0.0, 
+            #         strength=0.5,
+            #         generator=generator,
+            #         output_type="pt"
+            #     ).images     # pipe返回值为StableDiffusionPipelineOutput 类型，需要取images，形状 (1, C, H, W)
+            #     generated_image = 2 * generated_image - 1 # 将值域从[-1,1]转为[0,1]，防止图片泛白
             # else:
             #     generated_image = self.pipe(
             #         prompt, 
@@ -246,6 +255,9 @@ class ImageFilter:
         # SSIM计算
         ssim_val = ssim(after_01, before_01, window_size=5)
         metrics['ssim'] = torch.mean(ssim_val).item() if ssim_val.dim() > 0 else ssim_val.item()
+        
+        # LPIPS计算
+        metrics['lpips'] = self.lpips_fn(before, after).item()
         
         return metrics, mask
     
@@ -447,6 +459,7 @@ class ImageFilter:
                         "l1": metrics['l1'],
                         "l2": metrics['l2'],
                         "edit_ratio": metrics['edit_ratio'],
+                        "lpips": metrics['lpips'],
                         "pass_rate": pass_count / (enum_i + 1)
                     })
                 
@@ -488,21 +501,29 @@ def main():
     parser.add_argument("--enable_l1", type=lambda x: x.lower() == 'true', default=True, help="启用L1筛选 (True/False)")
     parser.add_argument("--enable_l2", type=lambda x: x.lower() == 'true', default=True, help="启用L2筛选 (True/False)")
     parser.add_argument("--enable_edit_ratio", type=lambda x: x.lower() == 'true', default=True, help="启用编辑比例筛选 (True/False)")
+    parser.add_argument("--enable_lpips", type=lambda x: x.lower() == 'true', default=True, help="启用LPIPS筛选 (True/False)")
     
     # 为每个指标添加最大值和最小值参数
-    parser.add_argument("--psnr_min", type=str, default="15.0", help="PSNR最小值，使用'min'表示无下限")
-    parser.add_argument("--psnr_max", type=str, default="max", help="PSNR最大值，使用'max'表示无上限")
-    parser.add_argument("--ssim_min", type=str, default="0.80", help="SSIM最小值，使用'min'表示无下限")
-    parser.add_argument("--ssim_max", type=str, default="max", help="SSIM最大值，使用'max'表示无上限")
-    parser.add_argument("--l1_min", type=str, default="min", help="L1最小值，使用'min'表示无下限")
-    parser.add_argument("--l1_max", type=str, default="0.15", help="L1最大值，使用'max'表示无上限")
-    parser.add_argument("--l2_min", type=str, default="min", help="L2最小值，使用'min'表示无下限")
-    parser.add_argument("--l2_max", type=str, default="0.03", help="L2最大值，使用'max'表示无上限")
-    parser.add_argument("--edit_ratio_min", type=str, default="min", help="编辑比例最小值，使用'min'表示无下限")
-    parser.add_argument("--edit_ratio_max", type=str, default="0.50", help="编辑比例最大值，使用'max'表示无上限")
+    parser.add_argument("--psnr_min", type=str, nargs='?', const="min", default="15.0", help="PSNR最小值，不指定值时表示无下限")
+    parser.add_argument("--psnr_max", type=str, nargs='?', const="max", default="max", help="PSNR最大值，不指定值时表示无上限")
+    parser.add_argument("--ssim_min", type=str, nargs='?', const="min", default="0.80", help="SSIM最小值，不指定值时表示无下限")
+    parser.add_argument("--ssim_max", type=str, nargs='?', const="max", default="max", help="SSIM最大值，不指定值时表示无上限")
+    parser.add_argument("--l1_min", type=str, nargs='?', const="min", default="min", help="L1最小值，不指定值时表示无下限")
+    parser.add_argument("--l1_max", type=str, nargs='?', const="max", default="0.15", help="L1最大值，不指定值时表示无上限")
+    parser.add_argument("--l2_min", type=str, nargs='?', const="min", default="min", help="L2最小值，不指定值时表示无下限")
+    parser.add_argument("--l2_max", type=str, nargs='?', const="max", default="0.03", help="L2最大值，不指定值时表示无上限")
+    parser.add_argument("--edit_ratio_min", type=str, nargs='?', const="min", default="min", help="编辑比例最小值，不指定值时表示无下限")
+    parser.add_argument("--edit_ratio_max", type=str, nargs='?', const="max", default="0.50", help="编辑比例最大值，不指定值时表示无上限")
+    parser.add_argument("--lpips_min", type=str, nargs='?', const="min", default="min", help="LPIPS最小值，不指定值时表示无下限")
+    parser.add_argument("--lpips_max", type=str, nargs='?', const="max", default="0.5", help="LPIPS最大值，不指定值时表示无上限")
     
     # 添加reverse_filter参数
     parser.add_argument("--reverse_filter", type=lambda x: x.lower() == 'true', default=False, help="从数据集末尾开始选取 (True/False)")
+    
+    # 添加推理参数
+    parser.add_argument("--num_inference_steps", type=int, default=10, help="推理步数")
+    parser.add_argument("--guidance_scale", type=float, default=7.5, help="引导尺度")
+    parser.add_argument("--image_guidance_scale", type=float, default=1.5, help="图像引导尺度")
     
     args = parser.parse_args()
     
@@ -543,6 +564,11 @@ def main():
             result += "edit"
             result += "_" if args.edit_ratio_min == 'min' else f"{args.edit_ratio_min}"
             result += "_" if args.edit_ratio_max == 'max' else f"{args.edit_ratio_max}"
+
+        if args.enable_lpips:
+            result += "lpips"
+            result += "_" if args.lpips_min == 'min' else f"{args.lpips_min}"
+            result += "_" if args.lpips_max == 'max' else f"{args.lpips_max}"
         
         # 添加filter_num，直接连接
         result += f"num{args.filter_num}"
@@ -596,6 +622,11 @@ def main():
             'enabled': args.enable_edit_ratio,
             'min': parse_value(args.edit_ratio_min, float),
             'max': parse_value(args.edit_ratio_max, float)
+        },
+        'lpips': {
+            'enabled': args.enable_lpips,
+            'min': parse_value(args.lpips_min, float),
+            'max': parse_value(args.lpips_max, float)
         }
     }
 
@@ -604,13 +635,18 @@ def main():
     
     # 记录配置信息
     config = {
-        "dataset_dir": data_dir,
+        "dataset_dir": args.data_dir,
         "output_dir": output_dir,
-        "model_dir": model_dir,
+        "model_dir": args.model_dir,
         "device": device,
-        "filter_num": filter_num,
+        "filter_num": args.filter_num,
+        "reverse_filter": args.reverse_filter,
+        "num_inference_steps": args.num_inference_steps,
+        "guidance_scale": args.guidance_scale,
+        "image_guidance_scale": args.image_guidance_scale,
         "metric_config": metric_config
     }
+
     logger.info("筛选配置:")
     logger.info(json.dumps(config, indent=2, ensure_ascii=False))
     logger.info(f"SLURM_JOB_ID: {os.environ.get('SLURM_JOB_ID', '')}")

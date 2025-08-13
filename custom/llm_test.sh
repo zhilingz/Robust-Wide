@@ -22,3 +22,6 @@ python custom/llm_test.py
 echo "job end"
 
 # sbatch custom/llm_test.sh
+# salloc -p gpu3 -N 1 -c 4 --mem 10G --gres gpu:1
+# srun --pty bash
+# conda activate Robust-Wide

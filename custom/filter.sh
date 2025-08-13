@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH -p gpu5       # gpu5:A6000 48G gpu3:2080Ti 11G
+#SBATCH -p gpu3       # gpu5:A6000 48G gpu3:2080Ti 11G
 #SBATCH -N 1          # 只在一个节点上运行任务
 #SBATCH -c 4          # 申请 CPU 核心：4个
 #SBATCH --mem 10G     # 申请内存
@@ -22,8 +22,8 @@ conda activate Robust-Wide
 nvidia-smi --query-gpu=gpu_name --format=csv,noheader
 
 # 数据集和模型配置
-DATA_ID=0  # 通过修改这个数字来选择数据集
-MODEL_ID=0  # 通过修改这个数字来选择模型
+DATA_ID=1  # 通过修改这个数字来选择数据集
+MODEL_ID=1  # 通过修改这个数字来选择模型
 declare -a DATASETS=(
     "/public/zhangzhiling/datasets/timbrooks___instructpix2pix-clip-filtered/default/0.0.0/aa665b890915f7a42f8615bee868a9f3447e178f"
     "/public/zhangzhiling/datasets/BleachNick___ultra_edit_500k/default/0.0.0/8d78dc552b576027618ff2170c4c1d7bcaf27ad2"
@@ -47,22 +47,28 @@ python -m custom.filter --filter_num 1000 \
     --data_dir $DATA_DIR \
     --model_dir $MODEL_DIR \
     --output_dir $OUTPUT_DIR \
-    --reverse_filter True \
-    --enable_psnr True \
+    --reverse_filter False \
+    --enable_psnr False \
     --psnr_min 17.0 \
-    --psnr_max max \
+    --psnr_max \
     --enable_ssim False \
     --ssim_min 0.80 \
-    --ssim_max max \
+    --ssim_max \
     --enable_l1 False \
-    --l1_min min \
+    --l1_min \
     --l1_max 0.15 \
     --enable_l2 False \
-    --l2_min min \
+    --l2_min \
     --l2_max 0.03 \
     --enable_edit_ratio False \
-    --edit_ratio_min min \
-    --edit_ratio_max 0.50
+    --edit_ratio_min \
+    --edit_ratio_max 0.50 \
+    --enable_lpips True \
+    --lpips_min 0.5 \
+    --lpips_max  \
+    --num_inference_steps 10 \
+    --guidance_scale 5 \
+    --image_guidance_scale 1.5
 
 # 示例：禁用某些指标
 # --enable_psnr False \
@@ -79,6 +85,12 @@ python -m custom.filter --filter_num 1000 \
 # --l2_max 0.05 \
 # --edit_ratio_min 0.1 \
 # --edit_ratio_max 0.8
+
+# 示例：使用简化语法（不指定值表示min/max）
+# --psnr_min        # 等同于 --psnr_min min
+# --psnr_max        # 等同于 --psnr_max max
+# --lpips_min       # 等同于 --lpips_min min
+# --lpips_max       # 等同于 --lpips_max max
 
 echo "job end"
 

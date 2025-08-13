@@ -26,9 +26,9 @@ echo "Current time: $(TZ='Asia/Shanghai' date '+%Y-%m-%d %H:%M:%S')"
 conda activate Robust-Wide
 
 python inference.py \
-  --ckpt_dir './examples/step20000' \
+  --ckpt_dir './train_results/2025-08-09T10-44-07_BleachNick___ultra_edit_500k_magicbrush-jul7_257556' \
   --image_file './examples/Gadot.png' \
-  --output_dir './inference_results'
+  --output_dir './evaluate/257647'
 
 echo "job end"  
 # sbatch inference.sh

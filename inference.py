@@ -26,10 +26,7 @@ def load_wm_model(ckpt_dir, wm_model_config_path=None):
     model.eval()
     return model, message_length
 
-
-@torch.no_grad()
-def main(ckpt_dir, instance_image_file, wm_data_dir, device="cuda:0",):
-    size = 512
+def generate_wm_image(wm_model, message_length, instance_image_file, wm_data_dir, size, device="cuda:0",):
     transform_list = [
         transforms.Resize(size, interpolation=transforms.InterpolationMode.BILINEAR),
         transforms.CenterCrop(size),
@@ -37,15 +34,12 @@ def main(ckpt_dir, instance_image_file, wm_data_dir, device="cuda:0",):
         transforms.Normalize([0.5], [0.5]),
     ]
     image_transforms = transforms.Compose(transform_list)
-    wm_model, message_length = load_wm_model(ckpt_dir=ckpt_dir)
-    wm_model = wm_model.to(device)
-    os.makedirs(wm_data_dir, exist_ok=True)
-    message = torch.randint(0, 2, size=(1, message_length)).float().to(device)
     instance_image = Image.open(instance_image_file).convert("RGB")
+    message = torch.randint(0, 2, size=(1, message_length)).float().to(device)
+
     image = image_transforms(instance_image).unsqueeze(0).to(device)
     wm_image = wm_model.encoder(image, message)
     decoded_message = wm_model.decoder(wm_image)
-
     img_name = instance_image_file.split("/")[-1].split(".")[0]
     residual = wm_image - image
     residual_abs = torch.abs(residual)
@@ -53,16 +47,21 @@ def main(ckpt_dir, instance_image_file, wm_data_dir, device="cuda:0",):
     residual_abs_min = torch.min(residual_abs).item()
     residual_image = normalize((residual_abs - residual_abs_min) / (residual_abs_max - residual_abs_min))
     ber = decoded_message_error_rate(message[0], decoded_message[0])
-
     save_image_for_tensor(image[0], f"{wm_data_dir}/{img_name}_orig.png")
     save_image_for_tensor(wm_image[0], f"{wm_data_dir}/{img_name}_wm.png")
     save_image_for_tensor(residual_image[0], f"{wm_data_dir}/{img_name}_res.png")
-
     psnr_value = psnr(denormalize(wm_image), denormalize(image), 1)
     ssim_value = torch.mean(ssim(denormalize(wm_image), denormalize(image), window_size=5))
 
     print(f"{wm_data_dir}/{img_name}_wm.png psnr: {psnr_value}, ssim: {ssim_value}, ber: {ber}")
 
+@torch.no_grad()
+def main(ckpt_dir, instance_image_file, wm_data_dir, device="cuda:0",):
+    size = 512
+    wm_model, message_length = load_wm_model(ckpt_dir=ckpt_dir)
+    wm_model = wm_model.to(device)
+    os.makedirs(wm_data_dir, exist_ok=True)
+    generate_wm_image(wm_model, message_length, instance_image_file, wm_data_dir, size, device="cuda:0",)
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()

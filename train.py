@@ -1105,17 +1105,18 @@ def main(args):
                         logger.info(log_dict)
 
                     if global_step % args.save_steps == 0:
-                        test_model(args, wm_model, test_dataloader, device, accelerator, global_step)
+                        # test_model(args, wm_model, test_dataloader, device, accelerator, global_step)
                         
                         # 保存模型
                         save_step_dir = os.path.join(output_with_time_dir, f"step{global_step}")
                         os.makedirs(save_step_dir, exist_ok=True)
                         save_all(wm_model, save_step_dir, accelerator, args, wm_model_config, pipe, image, wm_image, prompt, output_with_time_dir)
                     
-                    if args.enable_output_images and global_step < 4000 and global_step % args.save_steps == 0:
+                    if args.enable_output_images and global_step < 4000 and global_step % args.log_steps == 0:
                         _, metrics_A, metrics_B = create_comparison_image(pipe, accelerator, image, wm_image, prompt, output_with_time_dir+'/output_images', global_step)
-                        metrics_A_list.append(metrics_A)
-                        metrics_B_list.append(metrics_B)
+                        if global_step > 3000: # 前3000步水印模型还没训练好，不计算metrics
+                            metrics_A_list.append(metrics_A)
+                            metrics_B_list.append(metrics_B)
             
             if global_step >= args.max_train_steps:
                 finished_flag = True
@@ -1134,7 +1135,7 @@ def main(args):
             OmegaConf.save(wm_model_config, os.path.join(save_dir, "wm_model_config.yaml"))
         
         save_final(wm_model, output_with_time_dir)
-        test_model(args, wm_model, test_dataloader, device, accelerator)
+        # test_model(args, wm_model, test_dataloader, device, accelerator)
         
         # 最终统计（只在开启筛选时）
         if args.enable_online_filter and diff_values_all:
@@ -1184,8 +1185,58 @@ def main(args):
         log_file_path = os.path.join(output_with_time_dir, "log.txt")
         logger.info(f"训练结束，开始生成绘图，日志路径: {log_file_path}")
         os.system(f"python custom/log2plt.py -l {log_file_path}")
-    
 
+    # 清空GPU中的所有模型变量
+    logger.info("开始清空GPU中的模型变量...")
+    
+    # 删除模型变量
+    if 'wm_model' in locals():
+        del wm_model
+    if 'pipe' in locals():
+        del pipe
+    if 'opt' in locals():
+        del opt
+    if 'lr_scheduler' in locals():
+        del lr_scheduler
+    if 'train_dataloader' in locals():
+        del train_dataloader
+    if 'test_dataloader' in locals():
+        del test_dataloader
+    
+    # 清空GPU缓存
+    torch.cuda.empty_cache()
+    
+    # 强制垃圾回收
+    import gc
+    gc.collect()
+    
+    logger.info("GPU模型变量清理完成")
+
+    eval_img_dir = "/public/zhangzhiling/datasets/timbrooks___instructpix2pix-clip-filtered/default/0.0.0/aa665b890915f7a42f8615bee868a9f3447e178f"
+    if accelerator.is_main_process:
+        os.system(f"python evaluate.py \
+            --ckpt_dir '{output_with_time_dir}' \
+            --eval_img_dir {eval_img_dir} \
+            --output_dir '{output_with_time_dir}/evaluate/small' \
+            --num_inference_steps 10 \
+            --guidance_scale 3 \
+            --image_guidance_scale 1.5")
+        os.system(f"python evaluate.py \
+            --ckpt_dir '{output_with_time_dir}' \
+            --eval_img_dir {eval_img_dir} \
+            --output_dir '{output_with_time_dir}/evaluate/middle' \
+            --num_inference_steps 10 \
+            --guidance_scale 10 \
+            --image_guidance_scale 1.5")
+        os.system(f"python evaluate.py \
+            --ckpt_dir '{output_with_time_dir}' \
+            --eval_img_dir {eval_img_dir} \
+            --output_dir '{output_with_time_dir}/evaluate/large' \
+            --num_inference_steps 10 \
+            --guidance_scale 10 \
+            --image_guidance_scale 1.0")
+
+    
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--seed", type=int, default=22)

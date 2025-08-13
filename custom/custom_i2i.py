@@ -8,7 +8,7 @@ from diffusers.image_processor import VaeImageProcessor
 from diffusers.models import AutoencoderKL, UNet2DConditionModel
 from diffusers.schedulers import KarrasDiffusionSchedulers
 from diffusers.pipelines.stable_diffusion import StableDiffusionPipelineOutput, StableDiffusionSafetyChecker
-from transformers import CLIPTokenizer, CLIPTextModel, CLIPFeatureExtractor, CLIPVisionModelWithProjection
+from transformers import CLIPTokenizer, CLIPTextModel, CLIPImageProcessor, CLIPVisionModelWithProjection
 
 logger = logging.get_logger(__name__)  # pylint: disable=invalid-name
 
@@ -24,7 +24,7 @@ class CustomStableDiffusionImg2ImgPipeline(StableDiffusionImg2ImgPipeline):
         unet: UNet2DConditionModel,
         scheduler: KarrasDiffusionSchedulers,
         safety_checker: StableDiffusionSafetyChecker,
-        feature_extractor: CLIPFeatureExtractor,
+        feature_extractor: CLIPImageProcessor,
         image_encoder: CLIPVisionModelWithProjection = None,
         requires_safety_checker: bool = True,
     ):
