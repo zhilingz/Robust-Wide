@@ -33,3 +33,6 @@ python inference.py \
 echo "job end"  
 # sbatch inference.sh
 # tail -f log/
+# salloc -p gpu5 -N 1 -c 4 --mem 20G --gres gpu:1
+# srun --pty bash
+# conda activate Robust-Wide

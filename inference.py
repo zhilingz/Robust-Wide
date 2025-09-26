@@ -1,4 +1,5 @@
 import os
+import glob
 import torch
 from torchvision import transforms
 import argparse
@@ -61,7 +62,50 @@ def main(ckpt_dir, instance_image_file, wm_data_dir, device="cuda:0",):
     wm_model, message_length = load_wm_model(ckpt_dir=ckpt_dir)
     wm_model = wm_model.to(device)
     os.makedirs(wm_data_dir, exist_ok=True)
-    generate_wm_image(wm_model, message_length, instance_image_file, wm_data_dir, size, device="cuda:0",)
+    
+    # 支持的图片格式
+    supported_extensions = ['.jpg', '.jpeg', '.png', '.bmp', '.tiff', '.tif', '.webp']
+    
+    # 检查输入是文件还是文件夹
+    if os.path.isfile(instance_image_file):
+        # 处理单个文件
+        print(f"处理单个图片: {instance_image_file}")
+        generate_wm_image(wm_model, message_length, instance_image_file, wm_data_dir, size, device=device)
+    elif os.path.isdir(instance_image_file):
+        # 处理文件夹中的所有图片
+        print(f"处理文件夹: {instance_image_file}")
+        image_files = []
+        
+        # 遍历支持的图片格式，查找所有图片文件
+        for ext in supported_extensions:
+            # 同时支持大小写
+            pattern_lower = os.path.join(instance_image_file, f"*{ext.lower()}")
+            pattern_upper = os.path.join(instance_image_file, f"*{ext.upper()}")
+            image_files.extend(glob.glob(pattern_lower))
+            image_files.extend(glob.glob(pattern_upper))
+        
+        # 去重并排序
+        image_files = sorted(list(set(image_files)))
+        
+        if not image_files:
+            print(f"错误: 在文件夹 {instance_image_file} 中未找到支持的图片文件")
+            print(f"支持的格式: {', '.join(supported_extensions)}")
+            return
+            
+        print(f"找到 {len(image_files)} 个图片文件")
+        
+        # 处理每个图片文件
+        for i, image_file in enumerate(image_files, 1):
+            print(f"\n[{i}/{len(image_files)}] 处理: {os.path.basename(image_file)}")
+            try:
+                generate_wm_image(wm_model, message_length, image_file, wm_data_dir, size, device=device)
+            except Exception as e:
+                print(f"处理文件 {image_file} 时出错: {e}")
+                continue
+                
+        print(f"\n完成! 成功处理了 {len(image_files)} 个图片文件")
+    else:
+        print(f"错误: 路径 '{instance_image_file}' 既不是文件也不是文件夹")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()

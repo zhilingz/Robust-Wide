@@ -44,7 +44,7 @@ def find_images_in_folder(folder_path):
         raise FileNotFoundError(f"Folder not found: {folder_path}")
     
     # Fixed image names - 只需要原图和水印图
-    image_names = ["image.png", "wm_image.png"]
+    image_names = ["Gadot_orig.png", "Gadot_wm.png"]
     image_paths = []
     
     for name in image_names:
@@ -62,8 +62,8 @@ def main():
     parser.add_argument("-f", "--folder", help="Folder containing images (if provided, individual image paths are ignored)")
     
     # Individual image parameters
-    parser.add_argument("--image", default="image.png", help="Original image path (default: image.png)")
-    parser.add_argument("--wm_image", default="wm_image.png", help="Watermarked image path (default: wm_image.png)")
+    parser.add_argument("--image", default="Gadot_orig.png", help="Original image path (default: image.png)")
+    parser.add_argument("--wm_image", default="Gadot_wm.png", help="Watermarked image path (default: wm_image.png)")
     
     # Output parameter
     parser.add_argument("--output", help="Output image path (if not provided, will be auto-generated)")
@@ -89,12 +89,8 @@ def main():
         output_path = args.output
     
     # Read images
-    try:
-        orig_rgb = Image.open(image_path).convert("RGB")
-        wm_rgb = Image.open(wm_image_path).convert("RGB")
-    except Exception as e:
-        print(f"Error reading images: {e}")
-        return
+    orig_rgb = Image.open(image_path).convert("RGB")
+    wm_rgb = Image.open(wm_image_path).convert("RGB")
     
     # Convert to grayscale
     orig_gray = np.asarray(orig_rgb.convert("L"), dtype=float)

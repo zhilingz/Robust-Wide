@@ -55,9 +55,10 @@ def denormalize(images):
 
 
 def tensor_to_pil(images):
-    images = images.permute(0, 2, 3, 1).float()
+    # 检查维度并在必要时添加批次维度
     if images.ndim == 3:
-        images = images[None, ...]
+        images = images[None, ...]  # [C, H, W] -> [1, C, H, W]
+    images = images.permute(0, 2, 3, 1).float()
     images = (denormalize(images) * 255).detach().cpu().numpy().round().astype("uint8")
     if images.shape[-1] == 1:
         # special case for grayscale (single channel) images

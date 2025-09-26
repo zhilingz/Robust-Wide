@@ -1,4 +1,5 @@
 import os
+os.environ['HF_ENDPOINT'] = 'https://hf-mirror.com'
 import cv2
 import numpy as np
 import torch
@@ -18,6 +19,7 @@ import argparse
 from custom.custom_insp2p import CustomStableDiffusionInstructPix2PixPipeline
 from dataset import preprocess_train
 from functools import partial
+from custom.qwen_tie_scorer import QwenTieScorer
 
 # 设置日志记录器
 logger = logging.getLogger(__name__)
@@ -72,7 +74,8 @@ class ImageFilter:
             'l1': {'enabled': True, 'min': float('-inf'), 'max': 0.15},
             'l2': {'enabled': True, 'min': float('-inf'), 'max': 0.03},
             'edit_ratio': {'enabled': True, 'min': float('-inf'), 'max': 0.50},
-            'lpips': {'enabled': True, 'min': float('-inf'), 'max': 0.5}
+            'lpips': {'enabled': True, 'min': float('-inf'), 'max': 0.5},
+            'qwen': {'enabled': True, 'min': 6.0, 'max': float('inf')}
         }
         
         # 使用传入的配置或默认配置
@@ -87,6 +90,9 @@ class ImageFilter:
         
         # 初始化LPIPS模型
         self.lpips_fn = lpips.LPIPS(net='alex', verbose=False).to(self.device)
+
+        # 初始化QwenTieScorer
+        self.qwen_tie_scorer = QwenTieScorer(model_name="Qwen/Qwen2.5-VL-7B-Instruct-AWQ")
         
         self.pipe = self.initialize_pipeline()
 
@@ -234,7 +240,7 @@ class ImageFilter:
         
         return mask.sum() / 255 / mask.size, mask
         
-    def calculate_metrics(self, before, after):
+    def calculate_metrics(self, before, after, prompt=None):
         before = self._to_tensor(before)
         after = self._to_tensor(after)
         
@@ -259,6 +265,11 @@ class ImageFilter:
         # LPIPS计算
         metrics['lpips'] = self.lpips_fn(before, after).item()
         
+        # Qwen评分计算
+        before_pil = self.tensor_to_pil(before)
+        after_pil = self.tensor_to_pil(after)
+        metrics['qwen'] = self.qwen_tie_scorer(before_pil, after_pil, prompt)
+
         return metrics, mask
     
     def create_comparison_image(self, original_image, generated_image, mask, prompt=None):
@@ -417,7 +428,7 @@ class ImageFilter:
                 assert image.shape[-1] == 512 and image.shape[-2] == 512, f"image size must be 512x512, got {image.shape}"
 
                 generated_image = self.generate_image([prompt] if isinstance(prompt, str) else prompt, image.unsqueeze(0))
-                metrics, mask = self.calculate_metrics(image, generated_image)
+                metrics, mask = self.calculate_metrics(image, generated_image, prompt)
 
                 # 简化的筛选逻辑
                 passed = True
@@ -460,6 +471,7 @@ class ImageFilter:
                         "l2": metrics['l2'],
                         "edit_ratio": metrics['edit_ratio'],
                         "lpips": metrics['lpips'],
+                        "qwen": metrics['qwen'],
                         "pass_rate": pass_count / (enum_i + 1)
                     })
                 
@@ -502,6 +514,7 @@ def main():
     parser.add_argument("--enable_l2", type=lambda x: x.lower() == 'true', default=True, help="启用L2筛选 (True/False)")
     parser.add_argument("--enable_edit_ratio", type=lambda x: x.lower() == 'true', default=True, help="启用编辑比例筛选 (True/False)")
     parser.add_argument("--enable_lpips", type=lambda x: x.lower() == 'true', default=True, help="启用LPIPS筛选 (True/False)")
+    parser.add_argument("--enable_qwen", type=lambda x: x.lower() == 'true', default=True, help="启用Qwen筛选 (True/False)")
     
     # 为每个指标添加最大值和最小值参数
     parser.add_argument("--psnr_min", type=str, nargs='?', const="min", default="15.0", help="PSNR最小值，不指定值时表示无下限")
@@ -516,6 +529,8 @@ def main():
     parser.add_argument("--edit_ratio_max", type=str, nargs='?', const="max", default="0.50", help="编辑比例最大值，不指定值时表示无上限")
     parser.add_argument("--lpips_min", type=str, nargs='?', const="min", default="min", help="LPIPS最小值，不指定值时表示无下限")
     parser.add_argument("--lpips_max", type=str, nargs='?', const="max", default="0.5", help="LPIPS最大值，不指定值时表示无上限")
+    parser.add_argument("--qwen_min", type=str, nargs='?', const="min", default="6.0", help="Qwen评分最小值，不指定值时表示无下限")
+    parser.add_argument("--qwen_max", type=str, nargs='?', const="max", default="max", help="Qwen评分最大值，不指定值时表示无上限")
     
     # 添加reverse_filter参数
     parser.add_argument("--reverse_filter", type=lambda x: x.lower() == 'true', default=False, help="从数据集末尾开始选取 (True/False)")
@@ -569,6 +584,11 @@ def main():
             result += "lpips"
             result += "_" if args.lpips_min == 'min' else f"{args.lpips_min}"
             result += "_" if args.lpips_max == 'max' else f"{args.lpips_max}"
+        
+        if args.enable_qwen:
+            result += "qwen"
+            result += "_" if args.qwen_min == 'min' else f"{args.qwen_min}"
+            result += "_" if args.qwen_max == 'max' else f"{args.qwen_max}"
         
         # 添加filter_num，直接连接
         result += f"num{args.filter_num}"
@@ -627,6 +647,11 @@ def main():
             'enabled': args.enable_lpips,
             'min': parse_value(args.lpips_min, float),
             'max': parse_value(args.lpips_max, float)
+        },
+        'qwen': {
+            'enabled': args.enable_qwen,
+            'min': parse_value(args.qwen_min, float),
+            'max': parse_value(args.qwen_max, float)
         }
     }
 

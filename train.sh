@@ -1,8 +1,8 @@
 #!/bin/bash
-#SBATCH -p gpu5       # gpu5:A6000 48G gpu3:2080Ti 11G
+#SBATCH -p gpu5       # gpu5 A6000 48G ; gpu4 3090 24G ; gpu3 2080Ti 11G
 #SBATCH -N 1          # 只在一个节点上运行任务
 #SBATCH -c 4          # 申请 CPU 核心：4个
-#SBATCH --mem 10G     # 申请内存
+#SBATCH --mem 20G     # 申请内存
 #SBATCH --gres gpu:1  # 分配1个GPU
 #SBATCH -t 72:00:00   # 设置任务运行时间，格式为小时:分钟:秒
 #SBATCH -o log/%j.out # 标准输出重定向到日志文件
@@ -29,7 +29,7 @@ nvidia-smi --query-gpu=gpu_name --format=csv,noheader
 
 # 数据集和模型配置
 DATA_ID=1  # 通过修改这个数字来选择数据集
-MODEL_ID=1  # 通过修改这个数字来选择模型
+MODEL_ID=10  # 通过修改这个数字来选择模型
 declare -a DATASETS=(
     "/public/zhangzhiling/datasets/timbrooks___instructpix2pix-clip-filtered/default/0.0.0/aa665b890915f7a42f8615bee868a9f3447e178f"
     "/public/zhangzhiling/datasets/BleachNick___ultra_edit_500k/default/0.0.0/8d78dc552b576027618ff2170c4c1d7bcaf27ad2"
@@ -43,9 +43,16 @@ declare -a MODELS=(
     "/public/zhangzhiling/models/stabilityai/sd-turbo"
     "/public/zhangzhiling/models/stabilityai/sd-x2-latent-upscaler"
     "black-forest-labs/FLUX.1-Fill-dev"
+    "bmshj2018-factorized"
+    "bmshj2018-hyperprior"
+    "mbt2018-mean"
+    "mbt2018"
+    "cheng2020-anchor"
+    "instruct-pix2pix-vae"
 )
+        
 
-DATA_DIR="filtered_datasets/lpips0.5_num1000/BleachNick___ultra_edit_500k/magicbrush-jul7"
+DATA_DIR="filtered_datasets/qwen6.0_num1000/BleachNick___ultra_edit_500k/magicbrush-jul7"
 # DATA_DIR=${DATASETS[$DATA_ID]}
 MODEL_DIR=${MODELS[$MODEL_ID]}
 echo "数据集路径: $DATA_DIR"
@@ -70,24 +77,21 @@ accelerate launch --config_file ./config/accelerate_config.yaml train.py \
   --train_size 1000 \
   --test_size 1200 \
   --batch_size $BATCH_SIZE \
-  --max_train_steps 20000 \
-  --seed 42 \
-  --learning_rate 1e-3 \
-  --lr_scheduler "cosine" \
+  --max_train_steps 10000 \
+  --learning_rate 1e-5 \
+  --lr_scheduler "constant" \
   --lr_warmup_steps 400 \
   --log_steps 20 \
   --save_steps 2000 \
   --last_grad_steps 3 \
-  --decoder_weight 0.1 \
-  --enc_latent_weight 0.005 \
+  --decoder_weight 1.0 \
+  --enc_latent_weight 0 \
   --gradient_accumulation_steps 1 \
   --guidance_scale 1 \
   --image_guidance_scale 1 \
-  --test_num_inference_steps 10 \
-  --test_guidance_scale 10.0 \
-  --test_image_guidance_scale 1.0 \
   --enable_output_images \
   
 echo "job end"
 
 # sbatch --dependency=afterok:<jobid> train.sh 在某一任务成功后运行
+# squeue -o "%.6i %.5P %.15j %.14u %.8T %.12M %.15R %.4C %.12b %.10m"

@@ -18,16 +18,25 @@ scontrol show job ${SLURM_JOB_ID}
 echo "Current time: $(TZ='Asia/Shanghai' date)"
 
 conda activate Robust-Wide
+
+exp_dir='train_results/2025-09-26T00-08-12_BleachNick___ultra_edit_500k_cheng2020-anchor_261212'
+# watermark_strength=0.55
+
 python evaluate.py \
-  --ckpt_dir 'train_results/2025-08-09T20-24-30_BleachNick___ultra_edit_500k_magicbrush-jul7_257557' \
-  --eval_img_dir '/public/zhangzhiling/datasets/timbrooks___instructpix2pix-clip-filtered/default/0.0.0/aa665b890915f7a42f8615bee868a9f3447e178f' \
-  --output_dir 'evaluate' \
-  --num_inference_steps 10 \
-  --guidance_scale 10 \
-  --image_guidance_scale 1
+  --ckpt_dir "${exp_dir}" \
+  --edit_strength middle
+
+# python evaluate.py \
+#   --ckpt_dir "${exp_dir}" \
+#   --eval_img_dir '/public/zhangzhiling/datasets/timbrooks___instructpix2pix-clip-filtered/default/0.0.0/aa665b890915f7a42f8615bee868a9f3447e178f' \
+#   --output_dir "${exp_dir}/evaluate/large/watermark_strength_${watermark_strength}" \
+#   --edit_strength large \
+#   --watermark_strength ${watermark_strength}
+
 echo "job end"
 
 # sbatch evaluate.sh
 # salloc -p gpu3 -N 1 -c 4 --mem 10G --gres gpu:1
 # srun --pty bash
 # conda activate Robust-Wide
+# conda activate qwen25vl

@@ -20,7 +20,7 @@ def preprocess_train(examples, image_size):
     )
     
     # 打印 examples 的 keys
-    print("Examples keys:", examples.keys())
+    # print("Examples keys:", examples.keys())
     
     # 根据键选择图像
     image_keys = ["original_image", "source_image", "source_img", "image"]
@@ -96,26 +96,12 @@ def get_hugging_dataset(logger, instance_data_root, image_size, accelerator, tra
     logger.info(f"从 instructpix2pix 数据集末尾选择测试集，范围: {test_start_idx} - {instructpix2pix_total-1}")
     test_dataset = instructpix2pix_dataset["train"].select(range(test_start_idx, instructpix2pix_total))
     
-    # 确保只有主进程执行数据集转换（如果有accelerator的话）
-    if accelerator is not None:
-        with accelerator.main_process_first():
-            # 应用预处理
-            train_dataset = train_dataset.with_transform(partial(preprocess_train, image_size=image_size))
-            test_dataset = test_dataset.with_transform(partial(preprocess_train, image_size=image_size))
-            
-            # 输出训练集和测试集的大小
-            logger.info(f"训练集大小: {len(train_dataset)}")
-            logger.info(f"测试集大小: {len(test_dataset)}")
-    else:
-        # 没有accelerator时直接执行
-        # 应用预处理
-        train_dataset = train_dataset.with_transform(partial(preprocess_train, image_size=image_size))
-        test_dataset = test_dataset.with_transform(partial(preprocess_train, image_size=image_size))
-        
-        # 输出训练集和测试集的大小
-        logger.info(f"训练集大小: {len(train_dataset)}")
-        logger.info(f"测试集大小: {len(test_dataset)}")
-    
+    # 直接应用预处理并输出数据集大小
+    train_dataset = train_dataset.with_transform(partial(preprocess_train, image_size=image_size))
+    test_dataset = test_dataset.with_transform(partial(preprocess_train, image_size=image_size))
+    logger.info(f"训练集大小: {len(train_dataset)}")
+    logger.info(f"测试集大小: {len(test_dataset)}")
+
     return train_dataset, test_dataset
 
 def get_filtered_dataset(args, logger, image_size, accelerator, train_size=20000, test_size=1200):

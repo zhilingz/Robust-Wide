@@ -16,7 +16,8 @@ scontrol show job ${SLURM_JOB_ID}
 # 输出当前时间（上海市区时间）
 echo "Current time: $(TZ='Asia/Shanghai' date +"%Y-%m-%d %H:%M:%S %Z")"
 
-conda activate Robust-Wide
+# conda activate Robust-Wide
+conda activate qwen25vl
 
 # 显示GPU信息
 nvidia-smi --query-gpu=gpu_name --format=csv,noheader
@@ -63,12 +64,15 @@ python -m custom.filter --filter_num 1000 \
     --enable_edit_ratio False \
     --edit_ratio_min \
     --edit_ratio_max 0.50 \
-    --enable_lpips True \
+    --enable_lpips False \
     --lpips_min 0.5 \
     --lpips_max  \
-    --num_inference_steps 10 \
-    --guidance_scale 5 \
-    --image_guidance_scale 1.5
+    --enable_qwen True \
+    --qwen_min 6.0 \
+    --qwen_max  \
+    --num_inference_steps 3 \
+    --guidance_scale 1.0 \
+    --image_guidance_scale 1.0
 
 # 示例：禁用某些指标
 # --enable_psnr False \
@@ -96,3 +100,4 @@ echo "job end"
 
 # sbatch custom/filter.sh
 # tail -f log/
+# wmc-mon gpu wmc-slave-g

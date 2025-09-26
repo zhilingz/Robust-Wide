@@ -14,8 +14,8 @@ args = parser.parse_args()
 
 steps = []
 global_steps = []
-dec_loss_before_edit = []
-dec_loss_after_edit = []
+enc_loss = []
+dec_loss = []
 ssim_values = []
 psnr_values = []
 error_rate_before_edit_values = []
@@ -124,8 +124,10 @@ with open(log_file, "r") as f:
         if match:
             step = int(match.group(2))
             global_step = int(match.group(3))
-            before_edit = float(match.group(7))  # dec_loss_before_edit
-            after_edit = float(match.group(8))   # dec_loss_after_edit
+            enc_pixel_loss = float(match.group(5))  # enc_pixel_loss
+            enc_latent_loss = float(match.group(6))  # enc_latent_loss
+            dec_loss_before_edit = float(match.group(7))  # dec_loss_before_edit
+            dec_loss_after_edit = float(match.group(8))   # dec_loss_after_edit
             psnr = float(match.group(9))         # psnr
             ssim = float(match.group(10))         # ssim
             error_rate_before = float(match.group(11))  # error_rate_before_edit
@@ -134,8 +136,8 @@ with open(log_file, "r") as f:
             # 将数据添加到列表
             steps.append(step)
             global_steps.append(global_step)
-            dec_loss_before_edit.append(before_edit)
-            dec_loss_after_edit.append(after_edit)
+            enc_loss.append(enc_pixel_loss+enc_latent_loss)
+            dec_loss.append(dec_loss_before_edit+dec_loss_after_edit)
             psnr_values.append(psnr)
             ssim_values.append(ssim)
             error_rate_before_edit_values.append(error_rate_before)
@@ -176,10 +178,10 @@ with open(log_file, "r") as f:
 # 创建折线图
 plt.figure(figsize=(12, 18))
 
-# 子图 1: dec_loss_before_edit 和 dec_loss_after_edit
+# 子图 1: enc_loss 和 dec_loss
 plt.subplot(3, 1, 1)
-plt.plot(global_steps, dec_loss_before_edit, label="dec_loss_before_edit", color="blue")
-plt.plot(global_steps, dec_loss_after_edit, label="dec_loss_after_edit", color="red")
+plt.plot(global_steps, enc_loss, label="enc_loss", color="blue")
+plt.plot(global_steps, dec_loss, label="dec_loss", color="red")
 plt.xlabel("Global Step")
 plt.ylabel("Loss")
 plt.title("Decoder Loss Before and After Edit vs Global Step")
@@ -255,35 +257,3 @@ if test_date_time:
 # 保存图形为文件（包含测试结果）
 output_image_path = os.path.join(log_dir, "metrics_plot.png")
 plt.savefig(output_image_path, bbox_inches="tight")
-
-# 运行inference.py
-
-# 1. 找到最新的checkpoint文件夹（找有step的文件夹）
-step_dirs = glob.glob(os.path.join(log_dir, "step*"))
-if step_dirs:
-    # 按步骤数排序
-    step_dirs.sort(key=lambda x: int(re.search(r'step(\d+)', x).group(1)), reverse=True)
-    ckpt_dir = step_dirs[0]  # 取最大步骤的checkpoint
-else:
-    # 如果没有特定步骤的文件夹，则使用整个日志文件夹
-    print("警告：未找到有效的检查点目录，跳过推理步骤")
-    exit(0)
-
-print(f"使用检查点目录: {ckpt_dir}")
-
-# 2. 组装命令字符串（注意给路径加引号，防止含空格）
-image_file = './examples/Gadot.png'
-output_dir = log_dir
-cmd = (
-    f'python inference.py '
-    f'--ckpt_dir "{ckpt_dir}" '
-    f'--image_file "{image_file}" '
-    f'--output_dir "{output_dir}"'
-)
-
-# 3. 执行
-exit_code = os.system(cmd)
-
-# 4. 判断是否成功
-if exit_code != 0:
-    print(f"推理过程中出现错误，退出码: {exit_code >> 8}")
