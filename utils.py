@@ -9,7 +9,6 @@ import torch
 from einops import rearrange
 from torchvision import transforms
 
-from model import WatermarkModel
 
 
 def str2bool(v):
@@ -27,7 +26,7 @@ def decoded_message_error_rate(message, decoded_message):
     length = message.shape[0]
     message = message.gt(0.5)
     decoded_message = decoded_message.gt(0.5)
-    error_rate = float(sum(message != decoded_message)) / length
+    error_rate = (message != decoded_message).sum().item() / length
     return error_rate
 
 
@@ -100,6 +99,7 @@ def save_image_for_tensor(image, save_path):
 
 
 def load_wm_model(ckpt_dir):
+    from model import WatermarkModel
     wm_model_config_path = os.path.join(os.path.join(ckpt_dir, "wm_model_config.yaml"))
     wm_model_config = OmegaConf.load(wm_model_config_path)
     wm_model = WatermarkModel(**wm_model_config)

@@ -1,7 +1,8 @@
 import os
 os.environ['HF_ENDPOINT'] = 'https://hf-mirror.com'
 from datasets import load_dataset
-dataset = load_dataset("stepfun-ai/GEdit-Bench")
+
+dataset = load_dataset("poloclub/diffusiondb", trust_remote_code=True)
 
 # import os
 

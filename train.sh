@@ -29,7 +29,7 @@ nvidia-smi --query-gpu=gpu_name --format=csv,noheader
 
 # 数据集和模型配置
 DATA_ID=1  # 通过修改这个数字来选择数据集
-MODEL_ID=10  # 通过修改这个数字来选择模型
+MODEL_ID=12  # 通过修改这个数字来选择模型
 declare -a DATASETS=(
     "/public/zhangzhiling/datasets/timbrooks___instructpix2pix-clip-filtered/default/0.0.0/aa665b890915f7a42f8615bee868a9f3447e178f"
     "/public/zhangzhiling/datasets/BleachNick___ultra_edit_500k/default/0.0.0/8d78dc552b576027618ff2170c4c1d7bcaf27ad2"
@@ -49,6 +49,7 @@ declare -a MODELS=(
     "mbt2018"
     "cheng2020-anchor"
     "instruct-pix2pix-vae"
+    "maskmark-noiselayer"
 )
         
 
@@ -78,8 +79,8 @@ accelerate launch --config_file ./config/accelerate_config.yaml train.py \
   --test_size 1200 \
   --batch_size $BATCH_SIZE \
   --max_train_steps 10000 \
-  --learning_rate 1e-5 \
-  --lr_scheduler "constant" \
+  --learning_rate 1e-3 \
+  --lr_scheduler "cosine" \
   --lr_warmup_steps 400 \
   --log_steps 20 \
   --save_steps 2000 \
@@ -93,5 +94,8 @@ accelerate launch --config_file ./config/accelerate_config.yaml train.py \
   
 echo "job end"
 
+# salloc -p gpu3 -N 1 -c 4 --mem 10G --gres gpu:1
+# srun --pty bash
+# conda activate Robust-Wide
 # sbatch --dependency=afterok:<jobid> train.sh 在某一任务成功后运行
 # squeue -o "%.6i %.5P %.15j %.14u %.8T %.12M %.15R %.4C %.12b %.10m"

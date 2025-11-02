@@ -8,17 +8,24 @@ import argparse
 
 def calculate_residual(img1, img2):
     """
-    Calculate residual between two images
+    计算两张图片的残差，并进行归一化（标准化到0-255范围，参考 residual_image = (residual_abs - residual_abs_min) / (residual_abs_max - residual_abs_min)）
     """
-    # Ensure both images have the same dimensions
+    # 确保两张图片尺寸一致
     if img1.shape != img2.shape:
         raise ValueError("Both images must have the same dimensions")
     
-    # Calculate residual and normalize to 0-255 range
-    residual = np.abs(img1.astype(np.float32) - img2.astype(np.float32))
-    residual = np.clip(residual, 0, 255).astype(np.uint8)
-    
-    return residual
+    # 计算绝对残差
+    residual_abs = np.abs(img1.astype(np.float32) - img2.astype(np.float32))
+    residual_abs_max = np.max(residual_abs)
+    residual_abs_min = np.min(residual_abs)
+    # 防止分母为0
+    if residual_abs_max - residual_abs_min < 1e-8:
+        residual_image = np.zeros_like(residual_abs)
+    else:
+        residual_image = (residual_abs - residual_abs_min) / (residual_abs_max - residual_abs_min)
+    # 标准化到0-255并转为uint8
+    residual_image = (residual_image * 255).clip(0, 255).astype(np.uint8)
+    return residual_image
 
 def load_and_process_images(folder_path):
     """

@@ -14,3 +14,7 @@ evaluate/
 Step1X-Edit/
 ai-watermark/
 WatermarkAttacker/
+trustmark/
+evaluation/model/
+evaluation/results/
+wandb/

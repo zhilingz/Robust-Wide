@@ -1,11 +1,11 @@
 import os
-import io
 import argparse
 import datetime, pytz
 import json
 import logging
 import numpy as np
 import cv2
+import random
 
 import torch
 import torch.nn.functional as F
@@ -16,10 +16,6 @@ from torchvision.transforms.functional import to_pil_image
 from PIL import Image
 from torchvision import transforms
 import torch.nn.functional as F
-import random
-import kornia.filters as K
-import kornia.enhance as E
-import kornia.augmentation as A
 
 from accelerate import Accelerator
 from accelerate.utils import set_seed
@@ -32,6 +28,7 @@ from custom.custom_insp2p import CustomStableDiffusionInstructPix2PixPipeline
 
 from dataset import get_hugging_dataset, get_filtered_dataset, collate_fn
 from model import WatermarkModel
+from models import Noise
 from utils import (
     decoded_message_error_rate_batch,
     denormalize,
@@ -250,7 +247,7 @@ def initialize_pipeline(args, weight_dtype, device):
     elif args.model_dir == 'mbt2018':
         pipe = VAEWMAttacker('mbt2018', quality=1, metric='mse', device=device)
     elif args.model_dir == 'cheng2020-anchor':
-        pipe = VAEWMAttacker('cheng2020-anchor', quality=6, metric='mse', device=device)
+        pipe = VAEWMAttacker('cheng2020-anchor', quality=1, metric='mse', device=device)
     elif args.model_dir == 'instruct-pix2pix-vae':
         # 为instruct-pix2pix-vae模型单独加载VAE模块
         pipe = AutoencoderKL.from_pretrained(
@@ -260,6 +257,29 @@ def initialize_pipeline(args, weight_dtype, device):
             local_files_only=True
         ).to(device)
         pipe.train()
+    elif args.model_dir == 'maskmark-noiselayer':
+        noise_options = [
+            "Identity()",
+            "JpegMask(50)",
+            "JpegSS(50)", 
+            "Jpeg(50)",
+            "JpegTest(50)",
+            "MF(5)",
+            "GF(1,5)",
+            "GN(0,0.1)",
+            "SP(0.1)",
+            "BrightnessAdjustment(0.1)",
+            "ContrastAdjustment(0.1)",
+            "HueAdjustment(0.1)",
+            "SaturationAdjustment(0.1)", 
+            "ImageAdjustment(0.1)",
+            "Rotate(-90,90)",
+            "Perspective(0.1,0.5)",
+            "HorizontalFlip()",
+            "CropResize()",
+            # "VAE()"  # 如果需要的话取消注释
+        ]
+        pipe = Noise(random.choice(noise_options)).to(device)
     # elif "sd-turbo" in args.model_dir:
     #     from custom.custom_i2i import CustomStableDiffusionImg2ImgPipeline
     #     pipe = CustomStableDiffusionImg2ImgPipeline.from_pretrained(
@@ -359,6 +379,9 @@ def generate_image(args, pipe, prompt, wm_image, accelerator, is_test=False, dev
             # # 将输出从[0,1]转换回[-1,1]范围
             # generated_image = generated_image * 2 - 1
             generated_image = pipe(wm_image.to(dtype=torch.float16)).sample
+        elif args.model_dir == 'maskmark-noiselayer':
+            mask = torch.ones_like(wm_image[:, :1, :, :])  # Shape: [B, 1, H, W]
+            generated_image, _ = pipe(wm_image, mask)
         elif args.model_dir.split("/")[-1] == "instruct-pix2pix":
             generated_image = pipe(
                 prompt, 
@@ -652,235 +675,6 @@ def setup_logging(args, logger):
     logger.info(f"Slurm info: {slurm_info}")
 
     return output_with_time_dir
-
-def test_model(args, wm_model, test_dataloader, device, accelerator, global_step=None):
-    """
-    测试水印模型在多种场景下的性能：
-    1. 无失真场景
-    2. 图像编辑失真场景(使用生成模型)
-    3. 通用失真场景(包括多种图像处理操作)
-    
-    输出每种场景的比特错误率(BER)以及原图和水印图的SSIM和PSNR
-    """
-    # 重新加载 test_pipe
-    from diffusers import StableDiffusionInstructPix2PixPipeline, EulerAncestralDiscreteScheduler
-    test_pipe = StableDiffusionInstructPix2PixPipeline.from_pretrained(
-        "/public/zhangzhiling/models/timbrooks/instruct-pix2pix",
-        torch_dtype=wm_model.weight_dtype,
-        local_files_only=True,
-        safety_checker=None
-    ).to(device)
-    
-    # 单独设置调度器
-    test_pipe.scheduler = EulerAncestralDiscreteScheduler.from_config(test_pipe.scheduler.config)
-    test_pipe.text_encoder.eval()
-    test_pipe.unet.eval()
-    test_pipe.vae.eval() 
-    
-    # 定义通用失真变换
-    def apply_distortions(images, distortion_type):
-        if distortion_type == "jpeg":
-            # JPEG压缩
-            def apply_jpeg_compression(batch_images, quality=50):
-                """
-                对批量图像应用JPEG压缩（高效版本）
-                
-                参数:
-                batch_images: 形状为 [batch_size, channels, height, width] 的张量
-                quality: JPEG压缩质量 (0-100)
-                """
-                compressed_images = []
-                
-                # 创建内存缓冲区
-                buffer = io.BytesIO()
-                
-                # 遍历batch中的每个图像
-                for i in range(batch_images.shape[0]):
-                    # 提取单张图像并转换为PIL格式
-                    img_tensor = batch_images[i].cpu()  # [channels, height, width]
-                    img_pil = transforms.ToPILImage()(img_tensor)
-                    
-                    # 使用内存缓冲区进行JPEG压缩，避免文件IO
-                    buffer.seek(0)
-                    img_pil.save(buffer, format='JPEG', quality=quality)
-                    buffer.seek(0)
-                    
-                    # 从缓冲区加载压缩后的图像
-                    img_compressed = Image.open(buffer)
-                    
-                    # 转回张量并添加到列表
-                    compressed_img_tensor = transforms.ToTensor()(img_compressed)
-                    compressed_images.append(compressed_img_tensor)
-                
-                # 清理缓冲区
-                buffer.close()
-                
-                # 将处理后的图像重新组合为batch
-                return torch.stack(compressed_images).to(batch_images.device)
-            return apply_jpeg_compression(wm_image, quality=50)
-        elif distortion_type == "median_blur":
-            # 中值模糊
-            return K.median_blur(images, kernel_size=5)
-        elif distortion_type == "gaussian_blur":
-            # 高斯模糊
-            return transforms.GaussianBlur(kernel_size=5, sigma=(0.1, 2.0))(images)
-        elif distortion_type == "gaussian_noise":
-            # 高斯噪声
-            noise = torch.randn_like(images) * 0.05
-            return torch.clamp(images + noise, -1, 1)
-        elif distortion_type == "sharpness":
-            # 锐化
-            return E.sharpness(images, 2.0)  # 增强锐度
-        elif distortion_type == "brightness":
-            # 亮度调整
-            return E.adjust_brightness(images, 0.8)  # 降低亮度
-        elif distortion_type == "contrast":
-            # 对比度调整
-            return E.adjust_contrast(images, 1.5)  # 增加对比度
-        elif distortion_type == "saturation":
-            # 饱和度调整
-            return E.adjust_saturation(images, 1.5)  # 增加饱和度
-        elif distortion_type == "hue":
-            # 色调调整
-            return E.adjust_hue(images, 0.1)  # 调整色调
-        elif distortion_type == "noise_denoise":
-            # 添加噪声后去噪
-            noisy = images + torch.randn_like(images) * 0.1
-            return K.gaussian_blur2d(noisy, kernel_size=(5, 5), sigma=(1.5, 1.5))
-        elif distortion_type == "random_crop":
-            # 随机裁剪并调整回原始大小
-            batch, c, h, w = images.shape
-            crop_size = int(min(h, w) * 0.8)  # 裁剪80%的区域
-            cropped = transforms.RandomCrop(crop_size)(images)
-            return F.interpolate(cropped, size=(h, w), mode='bilinear', align_corners=False)
-        elif distortion_type == "random_rotation":
-            # 随机旋转
-            angles = random.uniform(-30, 30)  # 旋转角度在-30到30度之间
-            return transforms.functional.rotate(images, angles)
-        else:
-            return images
-    
-    # 测试模型
-    wm_model.eval()
-    
-    # 定义不同的测试场景
-    scenarios = ["no_distortion", "edit_distortion", "common_distortions"]
-    
-    # 扩展失真类型
-    distortion_types = [
-        "jpeg", "median_blur", "gaussian_blur", "gaussian_noise", 
-        "sharpness", "brightness", "contrast", "saturation", "hue",
-        "noise_denoise", "random_crop", "random_rotation", 
-    ]
-    
-    # 为每个场景创建比特错误率收集器
-    results = {
-        "no_distortion": 0,
-        "edit_distortion": 0,
-        "common_distortions": 0
-    }
-    
-    # 为通用失真场景创建每种失真类型的比特错误率收集器
-    for dist_type in distortion_types:
-        results[f"{dist_type}"] = 0
-    
-    # 添加SSIM和PSNR收集器
-    psnr_values = []
-    ssim_values = []
-    
-    # 计算数据集大小用于平均
-    dataset_size = len(test_dataloader)
-
-    with torch.no_grad():
-        for data in test_dataloader:
-            # 生成随机消息
-            message = torch.randint(0, 2, (args.batch_size, args.message_length)).to(
-                device=device, dtype=torch.float32
-            )
-            image, prompt = data["image"], data["prompt"]
-            
-            wm_image = wm_model.encoder(image, message)
-            
-            # 计算原图和水印图的PSNR和SSIM
-            psnr_value = psnr(denormalize(wm_image.detach()), denormalize(image), 1)
-            ssim_value = torch.mean(ssim(denormalize(wm_image.detach()), denormalize(image), window_size=5))
-            
-            psnr_values.append(psnr_value.item())
-            ssim_values.append(ssim_value.item())
-            
-            # ============ 场景1: 无失真 ============ #
-            decoded_message_no_distortion = wm_model.decoder(wm_image.to(dtype=torch.float32))
-            error_rate_no_distortion = decoded_message_error_rate_batch(
-                message, decoded_message_no_distortion
-            )
-            
-            results["no_distortion"] += error_rate_no_distortion
-            
-            # ============ 场景2: 图像编辑失真 ============ #
-            # 使用官方pipeline进行图像编辑
-            generator = torch.Generator(device="cpu").manual_seed(42)
-            generated_image = test_pipe(
-                prompt,
-                image=wm_image,
-                num_images_per_prompt=1,
-                num_inference_steps=args.test_num_inference_steps,
-                guidance_scale=args.test_guidance_scale,
-                image_guidance_scale=args.test_image_guidance_scale,
-                generator=generator,
-                output_type="pt",
-            ).images
-            decoded_message_after_edit = wm_model.decoder(generated_image.to(dtype=torch.float32))
-            
-            error_rate_after_edit = decoded_message_error_rate_batch(
-                message, decoded_message_after_edit
-            )
-            
-            results["edit_distortion"] += error_rate_after_edit
-            
-            # ============ 场景3: 通用失真 ============ #
-            common_distortion_total = 0
-            
-            for dist_type in distortion_types:
-                distorted_image = apply_distortions(wm_image, dist_type)
-                
-                decoded_message_distorted = wm_model.decoder(distorted_image.to(dtype=torch.float32))
-                
-                error_rate_distorted = decoded_message_error_rate_batch(
-                    message, decoded_message_distorted
-                )
-                
-                results[dist_type] += error_rate_distorted
-                common_distortion_total += error_rate_distorted
-            
-            # 更新通用失真的平均错误率
-            results["common_distortions"] += common_distortion_total / len(distortion_types)
-
-    log_dict = {}
-    
-    # 处理主要场景的平均错误率
-    for scenario in scenarios:
-        log_dict[f"{scenario}_BER"] = results[scenario] / dataset_size
-    
-    # 处理通用失真中每种失真类型的平均错误率
-    for dist_type in distortion_types:
-        log_dict[f"{dist_type}_BER"] = results[dist_type] / dataset_size
-    
-    # 添加SSIM和PSNR的平均值
-    log_dict["psnr"] = float(np.mean(psnr_values))
-    log_dict["ssim"] = float(np.mean(ssim_values))
-    
-    # 添加global_step信息
-    if global_step is not None:
-        log_dict["global_step"] = global_step
-    
-    logger.info(log_dict)
-    
-    # 释放 test_pipe 显存
-    del test_pipe  
-    torch.cuda.empty_cache()
-    
-    wm_model.train()
-    return log_dict
 
 def save_all(g_model, save_dir, accelerator, args, wm_model_config, pipe, image, wm_image, prompt, output_with_time_dir):
     """
@@ -1248,37 +1042,13 @@ def main(args):
     # 只在主进程执行，结束训练后自动调用绘图脚本
     if accelerator.is_main_process:
         log_file_path = os.path.join(output_with_time_dir, "log.txt")
-        logger.info(f"训练结束，开始生成绘图，日志路径: {log_file_path}")
+        logger.info(f"训练结束，生成log图，日志路径: {log_file_path}")
         os.system(f"python custom/log2plt.py -l {log_file_path}")
-        os.system(f"python custom/fft.py --folder {output_with_time_dir}")
+        logger.info(f"生成推理图")
         os.system(f"python custom/inference_auto.py -l {output_with_time_dir}")
-
-    # 清空GPU中的所有模型变量
-    logger.info("开始清空GPU中的模型变量...")
-    
-    # 删除模型变量
-    if 'wm_model' in locals():
-        del wm_model
-    if 'pipe' in locals():
-        del pipe
-    if 'opt' in locals():
-        del opt
-    if 'lr_scheduler' in locals():
-        del lr_scheduler
-    if 'train_dataloader' in locals():
-        del train_dataloader
-    if 'test_dataloader' in locals():
-        del test_dataloader
-    
-    # 清空GPU缓存
-    torch.cuda.empty_cache()
-    
-    # 强制垃圾回收
-    import gc
-    gc.collect()
-    
-    logger.info("GPU模型变量清理完成")
-
+        logger.info(f"生成频谱图")
+        os.system(f"python custom/fft.py --folder {output_with_time_dir}")
+        
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
@@ -1310,9 +1080,5 @@ if __name__ == "__main__":
     parser.add_argument("--filter_method", type=str, default="edit_ratio", help="Method for filtering out samples")
     parser.add_argument("--enable_offline_filter", action="store_true", default=False, help="Enable offline filtering")
     parser.add_argument("--enable_output_images", action="store_true", default=False, help="Enable output images")
-    # test_pipe参数
-    parser.add_argument("--test_num_inference_steps", type=int, default=10, help="Number of inference steps for test_pipe")
-    parser.add_argument("--test_guidance_scale", type=float, default=10.0, help="Guidance scale for test_pipe")
-    parser.add_argument("--test_image_guidance_scale", type=float, default=1.5, help="Image guidance scale for test_pipe")
     args = parser.parse_args()
     main(args)

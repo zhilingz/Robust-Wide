@@ -19,12 +19,12 @@ echo "Current time: $(TZ='Asia/Shanghai' date)"
 
 conda activate Robust-Wide
 
-exp_dir='train_results/2025-09-26T00-08-12_BleachNick___ultra_edit_500k_cheng2020-anchor_261212'
+exp_dir='train_results/2025-09-23T17-20-55_BleachNick___ultra_edit_500k_instruct-pix2pix-vae_261082'
 # watermark_strength=0.55
 
 python evaluate.py \
   --ckpt_dir "${exp_dir}" \
-  --edit_strength middle
+  --edit_strength small 
 
 # python evaluate.py \
 #   --ckpt_dir "${exp_dir}" \
